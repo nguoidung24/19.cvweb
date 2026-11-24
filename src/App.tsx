@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   collection,
   doc,
@@ -23,7 +22,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  BOOTSTRAP_ADMIN_EMAIL,
   DEPARTMENT_ID,
   Project,
   ROLE_LABELS,
@@ -35,12 +33,21 @@ import {
   WorkLog,
   WorkLogUnlock,
 } from './types/domain';
-import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
-import { checkIfDepartmentSeeded, resolveOrBootstrapCurrentUser } from './lib/firestoreService';
-import { canViewAdminSection, getVisibleTasks, isAdminUser } from './lib/rbac';
+import { db, handleFirestoreError, OperationType } from './lib/firebase';
+import {
+  checkIfDepartmentSeeded,
+  logoutSession,
+  restoreCurrentSession,
+} from './lib/firestoreService';
+import {
+  canViewAdminSection,
+  getVisibleTasks,
+  isAdminUser,
+  isLeadershipUser,
+} from './lib/rbac';
 import { seedDepartmentData } from './lib/seedData';
 import { AdminView } from './components/AdminView';
-import { AuthScreen } from './components/AuthScreen';
+import { AuthScreen, FirstLoginPasswordScreen } from './components/AuthScreen';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { CreateTaskModal } from './components/CreateTaskModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -64,9 +71,8 @@ const SECTION_TITLES: Record<NavSection, string> = {
 
 function AppContent() {
   const [authReady, setAuthReady] = useState(false);
-  const [firebaseEmail, setFirebaseEmail] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [blockedReason, setBlockedReason] = useState<'LOCKED' | 'NOT_INVITED' | null>(null);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
 
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
@@ -95,43 +101,63 @@ function AppContent() {
     }, 3500);
   }
 
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) {
-        setFirebaseEmail(null);
-        setCurrentUser(null);
-        setBlockedReason(null);
-        setAuthReady(true);
-        return;
+  async function ensureSeededIfAdmin(user: UserProfile) {
+    if (user.roles.includes('ADMIN')) {
+      const alreadySeeded = await checkIfDepartmentSeeded();
+      if (!alreadySeeded) {
+        await seedDepartmentData(user.uid);
       }
-      setFirebaseEmail(fbUser.email);
-      const res = await resolveOrBootstrapCurrentUser();
-      if (res.status === 'OK' && res.profile) {
-        setCurrentUser(res.profile);
-        setBlockedReason(null);
+    }
+  }
 
-        // Auto-seed department sample data if admin logs into an empty database
-        if (res.profile.roles.includes('ADMIN')) {
-          const alreadySeeded = await checkIfDepartmentSeeded();
-          if (!alreadySeeded) {
-            await seedDepartmentData(res.profile.uid);
-          }
-        }
+  useEffect(() => {
+    let active = true;
+    restoreCurrentSession().then(async (res) => {
+      if (!active) return;
+      if (res) {
+        setCurrentUser(res.user);
+        setMustChangePassword(res.mustChangePassword);
+        await ensureSeededIfAdmin(res.user);
       } else {
         setCurrentUser(null);
-        setBlockedReason(res.status === 'LOCKED' ? 'LOCKED' : 'NOT_INVITED');
+        setMustChangePassword(false);
       }
-      setAuthReady(true);
+      if (active) {
+        setAuthReady(true);
+      }
     });
-    return () => unsub();
+    return () => {
+      active = false;
+    };
   }, []);
 
+  async function handleAuthenticated(res: { user: UserProfile; mustChangePassword: boolean }) {
+    await ensureSeededIfAdmin(res.user);
+    setCurrentUser(res.user);
+    setMustChangePassword(res.mustChangePassword);
+    setActiveNav('WORKSPACE');
+  }
+
+  function handleLogout() {
+    logoutSession();
+    setCurrentUser(null);
+    setMustChangePassword(false);
+    setUsers([]);
+    setGroups([]);
+    setProjects([]);
+    setTasks([]);
+    setWorkLogs([]);
+    setUnlocks([]);
+    setAuditLogs([]);
+    setSelectedTaskId(null);
+    setUserMenuOpen(false);
+  }
+
   useEffect(() => {
-    if (!authReady || !currentUser) return;
+    if (!authReady || !currentUser || mustChangePassword) return;
 
     const uid = currentUser.uid;
-    const isBootAdmin =
-      (firebaseEmail || '').toLowerCase() === BOOTSTRAP_ADMIN_EMAIL.toLowerCase();
+    const isDeptLeadership = isLeadershipUser(currentUser);
 
     const unsubUsers = onSnapshot(
       query(collection(db, 'users'), where('departmentId', '==', DEPARTMENT_ID)),
@@ -141,7 +167,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'users')
     );
 
-    const groupsQ = isBootAdmin
+    const groupsQ = isDeptLeadership
       ? query(collection(db, 'groups'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'groups'), where('memberUids', 'array-contains', uid));
     const unsubGroups = onSnapshot(
@@ -156,7 +182,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'groups')
     );
 
-    const projectsQ = isBootAdmin
+    const projectsQ = isDeptLeadership
       ? query(collection(db, 'projects'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'projects'), where('memberIds', 'array-contains', uid));
     const unsubProjects = onSnapshot(
@@ -167,7 +193,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'projects')
     );
 
-    const tasksQ = isBootAdmin
+    const tasksQ = isDeptLeadership
       ? query(collection(db, 'tasks'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'tasks'), where('participantIds', 'array-contains', uid));
     const unsubTasks = onSnapshot(
@@ -178,7 +204,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'tasks')
     );
 
-    const workLogsQ = isBootAdmin
+    const workLogsQ = isDeptLeadership
       ? query(collection(db, 'workLogs'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'workLogs'), where('viewerIds', 'array-contains', uid));
     const unsubWorkLogs = onSnapshot(
@@ -189,7 +215,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'workLogs')
     );
 
-    const unlocksQ = isBootAdmin
+    const unlocksQ = isDeptLeadership
       ? query(collection(db, 'workLogUnlocks'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'workLogUnlocks'), where('userId', '==', uid));
     const unsubUnlocks = onSnapshot(
@@ -210,7 +236,7 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.GET, 'systemConfigs/department')
     );
 
-    const auditQ = isBootAdmin
+    const auditQ = isDeptLeadership
       ? query(collection(db, 'auditLogs'), where('departmentId', '==', DEPARTMENT_ID))
       : query(collection(db, 'auditLogs'), where('viewerIds', 'array-contains', uid));
     const unsubAudits = onSnapshot(
@@ -231,7 +257,7 @@ function AppContent() {
       unsubConfig();
       unsubAudits();
     };
-  }, [authReady, currentUser?.uid, firebaseEmail]);
+  }, [authReady, currentUser?.uid, mustChangePassword]);
 
   const visibleTasks = useMemo(
     () => getVisibleTasks(currentUser, tasks, projects),
@@ -259,12 +285,19 @@ function AppContent() {
     );
   }
 
-  if (!currentUser || blockedReason) {
+  if (!currentUser) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
+  if (mustChangePassword) {
     return (
-      <AuthScreen
-        blockedReason={blockedReason}
-        currentEmail={firebaseEmail}
-        onSignOut={() => signOut(auth)}
+      <FirstLoginPasswordScreen
+        user={currentUser}
+        onPasswordChanged={() => {
+          setMustChangePassword(false);
+          showToast('Đã đổi mật khẩu thành công. Chào mừng bạn vào hệ thống.');
+        }}
+        onSignOut={handleLogout}
       />
     );
   }
@@ -432,7 +465,9 @@ function AppContent() {
                 <div className="absolute right-0 mt-2 w-60 bg-white border border-slate-200 rounded-xl shadow-lg py-2 z-50">
                   <div className="px-4 py-2 border-b border-slate-100 text-xs">
                     <div className="font-semibold text-slate-900">{currentUser.fullName}</div>
-                    <div className="text-slate-500 mt-0.5 truncate">{firebaseEmail}</div>
+                    <div className="font-mono text-slate-500 mt-0.5 truncate">
+                      @{currentUser.username || currentUser.employeeCode}
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -447,10 +482,7 @@ function AppContent() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setUserMenuOpen(false);
-                      signOut(auth);
-                    }}
+                    onClick={handleLogout}
                     className="w-full flex items-center gap-2 px-4 py-2 text-xs text-red-700 hover:bg-red-50 text-left"
                   >
                     <LogOut className="w-3.5 h-3.5" />
@@ -589,6 +621,7 @@ function AppContent() {
 
       <ChangePasswordModal
         isOpen={changePassOpen}
+        username={currentUser.username || ''}
         onClose={() => setChangePassOpen(false)}
         onSuccess={showToast}
       />

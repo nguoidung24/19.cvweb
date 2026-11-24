@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
-import { updatePassword } from 'firebase/auth';
 import { KeyRound, X } from 'lucide-react';
-import { auth } from '../lib/firebase';
+import { changeOwnPassword } from '../lib/firestoreService';
 
 export function ChangePasswordModal({
   isOpen,
+  username,
   onClose,
   onSuccess,
 }: {
   isOpen: boolean;
+  username: string;
   onClose: () => void;
   onSuccess: (msg: string) => void;
 }) {
+  const [currentPass, setCurrentPass] = useState('');
   const [newPass, setNewPass] = useState('');
   const [confirmPass, setConfirmPass] = useState('');
   const [error, setError] = useState('');
@@ -22,29 +24,28 @@ export function ChangePasswordModal({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
-    if (newPass.length < 6) {
-      setError('Mật khẩu mới phải có ít nhất 6 ký tự.');
+    if (!currentPass) {
+      setError('Vui lòng nhập mật khẩu hiện tại.');
       return;
     }
     if (newPass !== confirmPass) {
       setError('Mật khẩu xác nhận không khớp.');
       return;
     }
-    if (!auth.currentUser) return;
     setSaving(true);
     try {
-      await updatePassword(auth.currentUser, newPass);
+      await changeOwnPassword({
+        username,
+        currentPassword: currentPass,
+        newPassword: newPass,
+      });
+      setCurrentPass('');
       setNewPass('');
       setConfirmPass('');
       onSuccess('Đã cập nhật mật khẩu thành công.');
       onClose();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('requires-recent-login')) {
-        setError('Vui lòng đăng xuất và đăng nhập lại trước khi đổi mật khẩu.');
-      } else {
-        setError('Tài khoản đang đăng nhập qua Google hoặc chưa hỗ trợ đổi mật khẩu trực tiếp.');
-      }
+      setError(err instanceof Error ? err.message : 'Không thể cập nhật mật khẩu.');
     } finally {
       setSaving(false);
     }
@@ -76,14 +77,30 @@ export function ChangePasswordModal({
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
+              Mật khẩu hiện tại
+            </label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={currentPass}
+              onChange={(e) => setCurrentPass(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
               Mật khẩu mới
             </label>
             <input
               type="password"
+              autoComplete="new-password"
               value={newPass}
               onChange={(e) => setNewPass(e.target.value)}
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
             />
+            <p className="mt-1 text-[11px] text-slate-500">
+              Ít nhất 8 ký tự gồm chữ hoa, chữ thường, chữ số và ký tự đặc biệt.
+            </p>
           </div>
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -91,6 +108,7 @@ export function ChangePasswordModal({
             </label>
             <input
               type="password"
+              autoComplete="new-password"
               value={confirmPass}
               onChange={(e) => setConfirmPass(e.target.value)}
               className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"

@@ -1,123 +1,49 @@
 import React, { useState } from 'react';
 import {
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-} from 'firebase/auth';
-import { AlertCircle, Building2, KeyRound, Lock, LogIn, Mail } from 'lucide-react';
-import { auth, googleProvider } from '../lib/firebase';
+  AlertCircle,
+  Building2,
+  Eye,
+  EyeOff,
+  KeyRound,
+  LogOut,
+  ShieldCheck,
+  User,
+} from 'lucide-react';
+import { UserProfile } from '../types/domain';
+import { changeOwnPassword, loginWithUsernamePassword } from '../lib/firestoreService';
 
 interface AuthScreenProps {
-  blockedReason?: 'LOCKED' | 'NOT_INVITED' | null;
-  currentEmail?: string | null;
-  onSignOut?: () => void;
+  onAuthenticated: (result: { user: UserProfile; mustChangePassword: boolean }) => void;
 }
 
-export function AuthScreen({ blockedReason, currentEmail, onSignOut }: AuthScreenProps) {
-  const [mode, setMode] = useState<'LOGIN' | 'FORGOT'>('LOGIN');
-  const [email, setEmail] = useState('');
+export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [info, setInfo] = useState('');
 
-  async function handleGoogleLogin() {
-    setError('');
-    setInfo('');
-    setLoading(true);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Không thể đăng nhập bằng Google.';
-      if (msg.includes('popup-closed-by-user')) {
-        setError('Cửa sổ đăng nhập đã đóng. Vui lòng thử lại.');
-      } else {
-        setError('Đăng nhập thất bại. Vui lòng kiểm tra kết nối và thử lại.');
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleEmailLogin(e: React.FormEvent) {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError('');
-    setInfo('');
-    if (!email.trim() || !password) {
-      setError('Vui lòng nhập đầy đủ email và mật khẩu.');
+    if (!username.trim() || !password) {
+      setError('Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu.');
       return;
     }
+
     setLoading(true);
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
+      const res = await loginWithUsernamePassword(username, password);
+      onAuthenticated(res);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('operation-not-allowed')) {
-        setError(
-          'Phương thức Email/Mật khẩu chưa được bật trong Firebase Console (Authentication > Sign-in method). Bạn có thể dùng "Đăng nhập bằng Google" hoặc bật Email/Password trong Firebase Console.'
-        );
-      } else if (msg.includes('invalid-credential') || msg.includes('wrong-password') || msg.includes('user-not-found')) {
-        setError('Email hoặc mật khẩu không chính xác.');
-      } else {
-        setError('Không thể đăng nhập. Vui lòng kiểm tra lại thông tin tài khoản.');
-      }
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Không thể đăng nhập. Vui lòng kiểm tra lại thông tin tài khoản.';
+      setError(msg);
     } finally {
       setLoading(false);
     }
-  }
-
-  async function handleForgotPassword(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
-    setInfo('');
-    if (!email.trim()) {
-      setError('Vui lòng nhập địa chỉ email để nhận liên kết đặt lại mật khẩu.');
-      return;
-    }
-    setLoading(true);
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      setInfo('Đã gửi email hướng dẫn đặt lại mật khẩu. Vui lòng kiểm tra hộp thư của bạn.');
-    } catch {
-      setError('Không thể gửi email đặt lại mật khẩu. Vui lòng liên hệ Quản trị viên phòng ban.');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  if (blockedReason) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-lg bg-red-50 text-red-700 shrink-0">
-              <Lock className="w-5 h-5" />
-            </div>
-            <div className="space-y-1">
-              <h1 className="text-lg font-semibold text-slate-900">
-                {blockedReason === 'LOCKED'
-                  ? 'Tài khoản đang bị tạm khóa'
-                  : 'Tài khoản chưa được cấp quyền truy cập'}
-              </h1>
-              <p className="text-sm text-slate-600 leading-relaxed">
-                {blockedReason === 'LOCKED'
-                  ? `Tài khoản (${currentEmail || ''}) hiện đang ở trạng thái khóa. Vui lòng liên hệ Quản trị viên phòng ban để mở khóa.`
-                  : `Hệ thống nội bộ không cho phép tự đăng ký. Email ${currentEmail || ''} chưa có trong danh sách nhân sự do Quản trị viên cấp.`}
-              </p>
-            </div>
-          </div>
-          {onSignOut && (
-            <button
-              type="button"
-              onClick={onSignOut}
-              className="w-full py-2.5 px-4 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
-            >
-              Đăng xuất và thử tài khoản khác
-            </button>
-          )}
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -137,11 +63,9 @@ export function AuthScreen({ blockedReason, currentEmail, onSignOut }: AuthScree
       <div className="mt-7 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white border border-slate-200 rounded-xl p-6 sm:p-8 space-y-6">
           <div className="space-y-1">
-            <h1 className="text-lg font-semibold text-slate-900">
-              {mode === 'LOGIN' ? 'Đăng nhập hệ thống' : 'Khôi phục mật khẩu'}
-            </h1>
+            <h1 className="text-lg font-semibold text-slate-900">Đăng nhập hệ thống</h1>
             <p className="text-xs text-slate-500">
-              Tài khoản do Quản trị viên cấp phát. Không hỗ trợ tự đăng ký bên ngoài.
+              Sử dụng tài khoản nội bộ do Quản trị viên cấp. Không hỗ trợ tự đăng ký.
             </p>
           </div>
 
@@ -152,127 +76,214 @@ export function AuthScreen({ blockedReason, currentEmail, onSignOut }: AuthScree
             </div>
           )}
 
-          {info && (
-            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 leading-relaxed">
-              {info}
-            </div>
-          )}
-
-          {mode === 'LOGIN' ? (
-            <div className="space-y-5">
-              <button
-                type="button"
-                disabled={loading}
-                onClick={handleGoogleLogin}
-                className="w-full inline-flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-lg bg-blue-700 text-white text-sm font-medium hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700 disabled:opacity-50 transition-colors"
-              >
-                <LogIn className="w-4 h-4" />
-                Đăng nhập nhanh bằng Google
-              </button>
-
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label htmlFor="login-username" className="block text-xs font-medium text-slate-700 mb-1.5">
+                Tên đăng nhập
+              </label>
               <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-slate-200" />
-                </div>
-                <div className="relative flex justify-center text-xs">
-                  <span className="bg-white px-3 text-slate-500">hoặc đăng nhập bằng Email & Mật khẩu</span>
-                </div>
-              </div>
-
-              <form onSubmit={handleEmailLogin} className="space-y-4">
-                <div>
-                  <label htmlFor="login-email" className="block text-xs font-medium text-slate-700 mb-1.5">
-                    Email công việc
-                  </label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="login-email"
-                      type="email"
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="ten.nhanvien@phongban.vn"
-                      className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700 focus:ring-1 focus:ring-blue-700"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label htmlFor="login-password" className="block text-xs font-medium text-slate-700">
-                      Mật khẩu
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMode('FORGOT');
-                        setError('');
-                        setInfo('');
-                      }}
-                      className="text-xs font-medium text-blue-700 hover:underline"
-                    >
-                      Quên mật khẩu?
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="login-password"
-                      type="password"
-                      autoComplete="current-password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700 focus:ring-1 focus:ring-blue-700"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full py-2.5 px-4 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-medium hover:bg-slate-50 disabled:opacity-50 transition-colors"
-                >
-                  {loading ? 'Đang xác thực...' : 'Đăng nhập bằng Mật khẩu'}
-                </button>
-              </form>
-            </div>
-          ) : (
-            <form onSubmit={handleForgotPassword} className="space-y-4">
-              <div>
-                <label htmlFor="reset-email" className="block text-xs font-medium text-slate-700 mb-1.5">
-                  Email đã đăng ký trong hệ thống
-                </label>
+                <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
-                  id="reset-email"
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="ten.nhanvien@phongban.vn"
-                  className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700 focus:ring-1 focus:ring-blue-700"
+                  id="login-username"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Nhập tên đăng nhập"
+                  className="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700 focus:ring-1 focus:ring-blue-700"
                 />
               </div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-2.5 px-4 rounded-lg bg-blue-700 text-white text-sm font-medium hover:bg-blue-800 disabled:opacity-50 transition-colors"
-              >
-                {loading ? 'Đang gửi...' : 'Gửi liên kết đặt lại mật khẩu'}
-              </button>
+            </div>
+
+            <div>
+              <label htmlFor="login-password" className="block text-xs font-medium text-slate-700 mb-1.5">
+                Mật khẩu
+              </label>
+              <div className="relative">
+                <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-9 pr-10 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700 focus:ring-1 focus:ring-blue-700"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                  aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 px-4 rounded-lg bg-blue-700 text-white text-sm font-medium hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {loading ? 'Đang xác thực...' : 'Đăng nhập'}
+            </button>
+          </form>
+
+          <p className="text-xs text-slate-500 text-center pt-2 border-t border-slate-100">
+            Quên mật khẩu? Vui lòng liên hệ Quản trị viên phòng ban để được đặt lại mật khẩu.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface FirstLoginPasswordScreenProps {
+  user: UserProfile;
+  onPasswordChanged: () => void;
+  onSignOut: () => void;
+}
+
+export function FirstLoginPasswordScreen({
+  user,
+  onPasswordChanged,
+  onSignOut,
+}: FirstLoginPasswordScreenProps) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError('');
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setError('Vui lòng nhập đầy đủ mật khẩu hiện tại và mật khẩu mới.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Mật khẩu xác nhận không khớp.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await changeOwnPassword({
+        username: user.username || '',
+        currentPassword,
+        newPassword,
+      });
+      onPasswordChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể cập nhật mật khẩu.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-center py-10 px-4 sm:px-6 lg:px-8">
+      <div className="sm:mx-auto sm:w-full sm:max-w-md">
+        <div className="bg-white border border-slate-200 rounded-xl p-6 sm:p-8 space-y-5">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div className="space-y-1">
+              <h1 className="text-lg font-semibold text-slate-900">
+                Đổi mật khẩu lần đầu
+              </h1>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Xin chào <strong>{user.fullName}</strong> (@{user.username}). Để đảm bảo an toàn tài khoản, bạn cần đổi mật khẩu mới trước khi vào hệ thống.
+              </p>
+            </div>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2.5 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 leading-relaxed">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label htmlFor="first-cur-pass" className="block text-xs font-medium text-slate-700 mb-1.5">
+                Mật khẩu hiện tại
+              </label>
+              <input
+                id="first-cur-pass"
+                type={showPasswords ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="first-new-pass" className="block text-xs font-medium text-slate-700 mb-1.5">
+                Mật khẩu mới
+              </label>
+              <input
+                id="first-new-pass"
+                type={showPasswords ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                Tối thiểu 8 ký tự gồm chữ hoa, chữ thường, chữ số và ký tự đặc biệt.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="first-confirm-pass" className="block text-xs font-medium text-slate-700 mb-1.5">
+                Xác nhận mật khẩu mới
+              </label>
+              <input
+                id="first-confirm-pass"
+                type={showPasswords ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
+              />
+            </div>
+
+            <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showPasswords}
+                onChange={(e) => setShowPasswords(e.target.checked)}
+              />
+              <span>Hiện mật khẩu</span>
+            </label>
+
+            <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => {
-                  setMode('LOGIN');
-                  setError('');
-                  setInfo('');
-                }}
-                className="w-full py-2 text-xs font-medium text-slate-600 hover:text-slate-900"
+                onClick={onSignOut}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
               >
-                Quay lại màn hình đăng nhập
+                <LogOut className="w-3.5 h-3.5" />
+                Đăng xuất
               </button>
-            </form>
-          )}
+              <button
+                type="submit"
+                disabled={saving}
+                className="flex-1 py-2.5 px-4 rounded-lg bg-blue-700 text-white text-sm font-medium hover:bg-blue-800 disabled:opacity-50 transition-colors"
+              >
+                {saving ? 'Đang cập nhật...' : 'Xác nhận đổi mật khẩu'}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     </div>

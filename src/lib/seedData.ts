@@ -8,6 +8,7 @@ import {
   TaskPriority,
   TaskStatus,
 } from '../types/domain';
+import { hashPassword } from './cryptoAuth';
 import { db, handleFirestoreError, OperationType } from './firebase';
 import { dateStrToNum, getVietnamNowParts } from './time';
 
@@ -51,6 +52,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
   // 2. Staff Roster: 1 Trưởng phòng, 1 Phó phòng, 4 Nhóm x (1 Trưởng nhóm + 3 Chuyên viên) + Admin (current user)
   const staff: Array<{
     uid: string;
+    username: string;
     employeeCode: string;
     fullName: string;
     title: string;
@@ -61,6 +63,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
   }> = [
     {
       uid: 'usr_tp_01',
+      username: 'tp01',
       employeeCode: 'TP-01',
       fullName: 'Nguyễn Minh Hoàng',
       title: 'Trưởng phòng Hành chính – Nghiệp vụ',
@@ -71,6 +74,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_pp_01',
+      username: 'pp01',
       employeeCode: 'PP-01',
       fullName: 'Trần Thị Thu Hà',
       title: 'Phó Trưởng phòng',
@@ -82,6 +86,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     // Nhóm 1: Hành chính tổng hợp
     {
       uid: 'usr_tn_1',
+      username: 'tn10',
       employeeCode: 'TN-10',
       fullName: 'Lê Quốc Khánh',
       title: 'Trưởng nhóm Hành chính tổng hợp',
@@ -92,6 +97,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_1_1',
+      username: 'cv11',
       employeeCode: 'CV-11',
       fullName: 'Phạm Lan Anh',
       title: 'Chuyên viên Văn thư – Lưu trữ',
@@ -102,6 +108,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_1_2',
+      username: 'cv12',
       employeeCode: 'CV-12',
       fullName: 'Đỗ Hoàng Nam',
       title: 'Chuyên viên Tổng hợp',
@@ -112,6 +119,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_1_3',
+      username: 'cv13',
       employeeCode: 'CV-13',
       fullName: 'Vũ Ngọc Mai',
       title: 'Chuyên viên Tiếp nhận hồ sơ',
@@ -123,6 +131,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     // Nhóm 2: Kế hoạch & Điều phối
     {
       uid: 'usr_tn_2',
+      username: 'tn20',
       employeeCode: 'TN-20',
       fullName: 'Ngô Thanh Tùng',
       title: 'Trưởng nhóm Kế hoạch & Điều phối',
@@ -133,6 +142,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_2_1',
+      username: 'cv21',
       employeeCode: 'CV-21',
       fullName: 'Bùi Thị Hồng Nhung',
       title: 'Chuyên viên Kế hoạch',
@@ -143,6 +153,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_2_2',
+      username: 'cv22',
       employeeCode: 'CV-22',
       fullName: 'Hoàng Đức Anh',
       title: 'Chuyên viên Điều phối nghiệp vụ',
@@ -153,6 +164,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_2_3',
+      username: 'cv23',
       employeeCode: 'CV-23',
       fullName: 'Nguyễn Thảo Vy',
       title: 'Chuyên viên Thống kê báo cáo',
@@ -164,6 +176,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     // Nhóm 3: Pháp chế & Hồ sơ
     {
       uid: 'usr_tn_3',
+      username: 'tn30',
       employeeCode: 'TN-30',
       fullName: 'Trịnh Văn Quang',
       title: 'Trưởng nhóm Pháp chế & Hồ sơ',
@@ -174,6 +187,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_3_1',
+      username: 'cv31',
       employeeCode: 'CV-31',
       fullName: 'Đặng Minh Thư',
       title: 'Chuyên viên Pháp chế',
@@ -184,6 +198,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_3_2',
+      username: 'cv32',
       employeeCode: 'CV-32',
       fullName: 'Lý Gia Bảo',
       title: 'Chuyên viên Thẩm định quy trình',
@@ -194,6 +209,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_3_3',
+      username: 'cv33',
       employeeCode: 'CV-33',
       fullName: 'Phan Thanh Hằng',
       title: 'Chuyên viên Kiểm soát tuân thủ',
@@ -205,6 +221,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     // Nhóm 4: Tài chính & Hậu cần
     {
       uid: 'usr_tn_4',
+      username: 'tn40',
       employeeCode: 'TN-40',
       fullName: 'Tạ Quang Huy',
       title: 'Trưởng nhóm Tài chính & Hậu cần',
@@ -215,6 +232,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_4_1',
+      username: 'cv41',
       employeeCode: 'CV-41',
       fullName: 'Dương Kim Ngân',
       title: 'Chuyên viên Dự toán & Thanh quyết toán',
@@ -225,6 +243,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_4_2',
+      username: 'cv42',
       employeeCode: 'CV-42',
       fullName: 'Huỳnh Tuấn Kiệt',
       title: 'Chuyên viên Quản lý tài sản',
@@ -235,6 +254,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     },
     {
       uid: 'usr_cv_4_3',
+      username: 'cv43',
       employeeCode: 'CV-43',
       fullName: 'Cao Mỹ Linh',
       title: 'Chuyên viên Mua sắm & Hậu cần',
@@ -252,6 +272,7 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     if (!uSnap.exists()) {
       batch1.set(doc(db, 'users', member.uid), {
         uid: member.uid,
+        username: member.username,
         employeeCode: member.employeeCode,
         fullName: member.fullName,
         title: member.title,
@@ -266,6 +287,12 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
       batch1.set(doc(db, 'users', member.uid, 'private', 'info'), {
         uid: member.uid,
         email: member.email,
+        updatedAt: serverTimestamp(),
+      });
+      hasBatch1Writes = true;
+    } else if (!uSnap.data()?.username) {
+      batch1.update(doc(db, 'users', member.uid), {
+        username: member.username,
         updatedAt: serverTimestamp(),
       });
       hasBatch1Writes = true;
@@ -402,9 +429,36 @@ export async function seedDepartmentData(currentAdminUid: string): Promise<void>
     handleFirestoreError(error, OperationType.WRITE, 'seedDepartmentData/batch1');
   }
 
-  // Batch 2: Project members & Sample Tasks (after projects exist!)
+  // Batch 2: AuthCredentials for seeded staff, Project members & Sample Tasks (after users & projects exist!)
   const batch2 = writeBatch(db);
   let hasBatch2Writes = false;
+
+  // Generate an ephemeral random initial hash for seeded demo accounts; Admin sets/resets passwords before issuing
+  const randomSeedBytes = new Uint8Array(16);
+  crypto.getRandomValues(randomSeedBytes);
+  const randomSeedToken = Array.from(randomSeedBytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  const seededStaffHash = await hashPassword(randomSeedToken);
+
+  for (const member of staff) {
+    const cSnap = await getDoc(doc(db, 'authCredentials', member.username));
+    if (!cSnap.exists()) {
+      batch2.set(doc(db, 'authCredentials', member.username), {
+        username: member.username,
+        userId: member.uid,
+        passwordHash: seededStaffHash,
+        mustChangePassword: true,
+        isActive: true,
+        failedAttempts: 0,
+        lockedUntil: 0,
+        departmentId: DEPARTMENT_ID,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      hasBatch2Writes = true;
+    }
+  }
 
   for (const p of projects) {
     for (const uid of p.memberIds) {

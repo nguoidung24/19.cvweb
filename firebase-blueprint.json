@@ -6,6 +6,7 @@
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9._\\-]+$" },
         "authUid": { "type": "string", "maxLength": 128 },
         "employeeCode": { "type": "string", "maxLength": 32 },
         "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
@@ -19,6 +20,24 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "employeeCode", "fullName", "roles", "isActive", "departmentId", "createdAt", "updatedAt"]
+    },
+    "AuthCredential": {
+      "title": "AuthCredential",
+      "description": "Thông tin xác thực nội bộ (PBKDF2 salted hash) tách biệt khỏi hồ sơ nhân sự",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-z0-9._\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128 },
+        "passwordHash": { "type": "string", "maxLength": 256 },
+        "mustChangePassword": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "failedAttempts": { "type": "number" },
+        "lockedUntil": { "type": "number" },
+        "departmentId": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "userId", "passwordHash", "mustChangePassword", "isActive", "failedAttempts", "departmentId", "createdAt", "updatedAt"]
     },
     "UserPrivateInfo": {
       "title": "UserPrivateInfo",
@@ -315,6 +334,10 @@
     "/invites/{inviteId}": {
       "schema": { "$ref": "#/entities/Invite" },
       "description": "Lời mời kích hoạt hồ sơ nhân sự"
+    },
+    "/authCredentials/{username}": {
+      "schema": { "$ref": "#/entities/AuthCredential" },
+      "description": "Thông tin đăng nhập nội bộ tách biệt"
     }
   }
 }

@@ -16,6 +16,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidUsername(u) {
+      return u is string && u.size() >= 2 && u.size() <= 64 && u.matches('^[a-z0-9._\\-]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -24,59 +28,28 @@ service cloud.firestore {
       return resource.data;
     }
 
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
-    }
-
-    function isBootstrappedAdmin() {
-      return isVerified() && request.auth.token.email == 'dungtamtithoi24@gmail.com';
-    }
-
     function userDoc(uid) {
       return get(/databases/$(database)/documents/users/$(uid));
     }
 
     function userExists(uid) {
-      return exists(/databases/$(database)/documents/users/$(uid));
+      return isValidId(uid) && exists(/databases/$(database)/documents/users/$(uid));
     }
 
-    function isActiveUser() {
-      return isBootstrappedAdmin() || (
-        isVerified() &&
-        userExists(request.auth.uid) &&
-        userDoc(request.auth.uid).data.isActive == true
-      );
+    function isActiveUser(uid) {
+      return userExists(uid) && userDoc(uid).data.isActive == true && userDoc(uid).data.departmentId == 'DAMA2';
     }
 
-    function hasRole(role) {
-      return isVerified() && userExists(request.auth.uid) && userDoc(request.auth.uid).data.isActive == true && (role in userDoc(request.auth.uid).data.roles);
+    function userHasRole(uid, role) {
+      return isActiveUser(uid) && (role in userDoc(uid).data.roles);
     }
 
-    function isAdmin() {
-      return isBootstrappedAdmin() || hasRole('ADMIN');
+    function isAdminUser(uid) {
+      return userHasRole(uid, 'ADMIN');
     }
 
-    function isLeadership() {
-      return isAdmin() || hasRole('TRUONG_PHONG') || hasRole('PHO_PHONG');
-    }
-
-    function isGroupLeader(groupId) {
-      return isActiveUser() && hasRole('TRUONG_NHOM') && userDoc(request.auth.uid).data.groupId == groupId;
-    }
-
-    function isProjectManager(projectId) {
-      return projectId != '' &&
-        exists(/databases/$(database)/documents/projects/$(projectId)) &&
-        get(/databases/$(database)/documents/projects/$(projectId)).data.pmId == request.auth.uid;
-    }
-
-    function isProjectMember(projectId) {
-      return projectId != '' &&
-        exists(/databases/$(database)/documents/projects/$(projectId)/members/$(request.auth.uid));
+    function isLeadershipUser(uid) {
+      return isAdminUser(uid) || userHasRole(uid, 'TRUONG_PHONG') || userHasRole(uid, 'PHO_PHONG');
     }
 
     // Vietnam Time (UTC+7) helpers for WorkLog date lock
@@ -93,7 +66,7 @@ service cloud.firestore {
     }
 
     function isWorkLogDateEditable(uid, workDate, workDateNum) {
-      return isAdmin() || (
+      return isAdminUser(uid) || (
         workDateNum <= vnTodayNum() && (
           workDateNum == vnTodayNum() ||
           hasWorkLogUnlock(uid, workDate)
@@ -111,8 +84,9 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'employeeCode', 'fullName', 'roles', 'isActive', 'departmentId', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'authUid', 'employeeCode', 'fullName', 'title', 'roles', 'groupId', 'managerId', 'isActive', 'departmentId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'username', 'authUid', 'employeeCode', 'fullName', 'title', 'roles', 'groupId', 'managerId', 'isActive', 'departmentId', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
+        (!('username' in data) || isValidUsername(data.username)) &&
         (!('authUid' in data) || (data.authUid is string && data.authUid.size() <= 128)) &&
         data.employeeCode is string && data.employeeCode.size() >= 1 && data.employeeCode.size() <= 32 &&
         data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
@@ -126,12 +100,27 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidAuthCredential(data) {
+      return data.keys().hasAll(['username', 'userId', 'passwordHash', 'mustChangePassword', 'isActive', 'failedAttempts', 'departmentId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['username', 'userId', 'passwordHash', 'mustChangePassword', 'isActive', 'failedAttempts', 'lockedUntil', 'departmentId', 'createdAt', 'updatedAt']) &&
+        isValidUsername(data.username) &&
+        isValidId(data.userId) &&
+        data.passwordHash is string && data.passwordHash.size() >= 20 && data.passwordHash.size() <= 256 &&
+        data.mustChangePassword is bool &&
+        data.isActive is bool &&
+        data.failedAttempts is int && data.failedAttempts >= 0 && data.failedAttempts <= 100 &&
+        (!('lockedUntil' in data) || (data.lockedUntil is number && data.lockedUntil >= 0)) &&
+        data.departmentId == 'DAMA2' &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     function isValidUserPrivate(data) {
       return data.keys().hasAll(['uid', 'email', 'updatedAt']) &&
         data.keys().hasOnly(['uid', 'authUid', 'email', 'phone', 'updatedAt']) &&
         isValidId(data.uid) &&
         (!('authUid' in data) || (data.authUid is string && data.authUid.size() <= 128)) &&
-        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.email is string && data.email.size() <= 160 &&
         (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
         data.updatedAt is timestamp;
     }
@@ -234,7 +223,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'authorId', 'authorName', 'content', 'taskParticipantIds', 'createdAt']) &&
         data.keys().hasOnly(['id', 'authorId', 'authorName', 'content', 'mentions', 'taskParticipantIds', 'createdAt']) &&
         isValidId(data.id) &&
-        data.authorId == request.auth.uid &&
+        isActiveUser(data.authorId) &&
         data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
         data.content is string && data.content.size() >= 1 && data.content.size() <= 2000 &&
         (!('mentions' in data) || (data.mentions is list && data.mentions.size() <= 20 && (data.mentions.size() == 0 || data.mentions[0] is string))) &&
@@ -246,27 +235,11 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'actorId', 'actorName', 'action', 'detail', 'taskParticipantIds', 'createdAt']) &&
         data.keys().hasOnly(['id', 'actorId', 'actorName', 'action', 'detail', 'taskParticipantIds', 'createdAt']) &&
         isValidId(data.id) &&
-        data.actorId == request.auth.uid &&
+        isActiveUser(data.actorId) &&
         data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120 &&
         data.action is string && data.action.size() >= 1 && data.action.size() <= 80 &&
         data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 1000 &&
         data.taskParticipantIds is list && data.taskParticipantIds.size() >= 1 && data.taskParticipantIds.size() <= 50 && data.taskParticipantIds[0] is string &&
-        data.createdAt is timestamp;
-    }
-
-    function isValidInvite(data) {
-      return data.keys().hasAll(['id', 'email', 'targetUserId', 'roles', 'fullName', 'employeeCode', 'isActive', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'email', 'targetUserId', 'roles', 'groupId', 'managerId', 'fullName', 'employeeCode', 'title', 'isActive', 'createdAt']) &&
-        isValidId(data.id) &&
-        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
-        isValidId(data.targetUserId) &&
-        isValidRolesList(data.roles) &&
-        (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 64)) &&
-        (!('managerId' in data) || (data.managerId is string && data.managerId.size() <= 128)) &&
-        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-        data.employeeCode is string && data.employeeCode.size() >= 1 && data.employeeCode.size() <= 32 &&
-        (!('title' in data) || (data.title is string && data.title.size() <= 120)) &&
-        data.isActive is bool &&
         data.createdAt is timestamp;
     }
 
@@ -295,7 +268,7 @@ service cloud.firestore {
         isValidId(data.userId) &&
         data.workDate is string && data.workDate.size() == 10 && data.workDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
         data.id == (data.userId + '_' + data.workDate) &&
-        data.unlockedBy == request.auth.uid &&
+        isLeadershipUser(data.unlockedBy) &&
         data.reason is string && data.reason.size() >= 3 && data.reason.size() <= 500 &&
         data.departmentId == 'DAMA2' &&
         data.unlockedAt is timestamp;
@@ -319,7 +292,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'actorId', 'actorName', 'action', 'targetType', 'targetId', 'detail', 'viewerIds', 'departmentId', 'createdAt']) &&
         data.keys().hasOnly(['id', 'actorId', 'actorName', 'action', 'targetType', 'targetId', 'detail', 'viewerIds', 'departmentId', 'createdAt']) &&
         isValidId(data.id) &&
-        data.actorId == request.auth.uid &&
+        isActiveUser(data.actorId) &&
         data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 120 &&
         data.action is string && data.action.size() >= 1 && data.action.size() <= 80 &&
         data.targetType is string && data.targetType.size() >= 1 && data.targetType.size() <= 40 &&
@@ -332,137 +305,101 @@ service cloud.firestore {
 
     // --- Collection Rules ---
 
-    // Department Directory snapshot (non-PII, readable by active department members)
-    match /directories/{dirId} {
-      allow get: if isValidId(dirId) && isActiveUser();
-      allow create, update: if isValidId(dirId) && isAdmin() &&
-        incoming().keys().hasAll(['departmentId', 'updatedAt']) &&
-        incoming().keys().hasOnly(['departmentId', 'members', 'updatedAt']) &&
-        incoming().departmentId == 'DAMA2' &&
-        incoming().updatedAt == request.time;
+    // Internal Auth Credentials (PBKDF2 salted hashes, NEVER allow list)
+    match /authCredentials/{username} {
+      allow get: if isValidUsername(username);
+      allow create: if isValidUsername(username) &&
+        isValidAuthCredential(incoming()) &&
+        incoming().username == username &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          username == 'mbfs_admin' ||
+          userExists(incoming().userId)
+        );
+      allow update: if isValidUsername(username) &&
+        isValidAuthCredential(incoming()) &&
+        incoming().username == existing().username &&
+        incoming().userId == existing().userId &&
+        incoming().departmentId == existing().departmentId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['passwordHash', 'mustChangePassword', 'failedAttempts', 'lockedUntil', 'isActive', 'updatedAt'])
+        );
     }
 
     // Users (non-PII org directory)
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isActiveUser() || (isVerified() && userId == request.auth.uid));
-      allow list: if isVerified() && (isBootstrappedAdmin() || resource.data.departmentId == 'DAMA2');
+      allow get: if isValidId(userId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(userId) &&
-        isVerified() &&
         isValidUserProfile(incoming()) &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time && (
-          isAdmin() ||
-          (isBootstrappedAdmin() && userId == request.auth.uid) ||
-          (
-            userId == request.auth.uid &&
-            exists(/databases/$(database)/documents/invites/$(request.auth.token.email.lower().replace('[^a-z0-9]', '_'))) &&
-            incoming().roles == get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower().replace('[^a-z0-9]', '_'))).data.roles &&
-            incoming().isActive == get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower().replace('[^a-z0-9]', '_'))).data.isActive
-          )
-        );
+        incoming().updatedAt == request.time;
 
       allow update: if isValidId(userId) &&
-        isVerified() &&
         isValidUserProfile(incoming()) &&
         incoming().uid == existing().uid &&
         incoming().departmentId == existing().departmentId &&
         incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time && (
-          isAdmin() ||
-          (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'title', 'updatedAt']))
-        );
+        incoming().updatedAt == request.time;
 
       match /private/{docId} {
-        allow get: if isValidId(userId) && isValidId(docId) && isVerified() && (userId == request.auth.uid || isLeadership());
-        allow list: if isVerified() && (isBootstrappedAdmin() || resource.data.uid == request.auth.uid);
-        allow create: if isValidId(userId) && isValidId(docId) && isVerified() && isValidUserPrivate(incoming()) && incoming().updatedAt == request.time && (isAdmin() || userId == request.auth.uid);
-        allow update: if isValidId(userId) && isValidId(docId) && isVerified() && isValidUserPrivate(incoming()) && incoming().uid == existing().uid && incoming().updatedAt == request.time && (isAdmin() || userId == request.auth.uid);
+        allow get: if isValidId(userId) && isValidId(docId);
+        allow create: if isValidId(userId) && isValidId(docId) && isValidUserPrivate(incoming()) && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(docId) && isValidUserPrivate(incoming()) && incoming().uid == existing().uid && incoming().updatedAt == request.time;
       }
     }
 
     // Work Groups (4 groups)
     match /groups/{groupId} {
-      allow get: if isValidId(groupId) && isActiveUser();
-      allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.memberUids);
+      allow get: if isValidId(groupId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
 
-      allow create: if isValidId(groupId) && isAdmin() && isValidGroup(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
-      allow update: if isValidId(groupId) && isAdmin() && isValidGroup(incoming()) && incoming().id == existing().id && incoming().departmentId == existing().departmentId && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time;
+      allow create: if isValidId(groupId) && isValidGroup(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isValidId(groupId) && isValidGroup(incoming()) && incoming().id == existing().id && incoming().departmentId == existing().departmentId && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time;
     }
 
     // Projects
     match /projects/{projectId} {
-      allow get: if isValidId(projectId) && isActiveUser() && (isLeadership() || isProjectMember(projectId) || resource.data.pmId == request.auth.uid || request.auth.uid in resource.data.memberIds);
-      allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.memberIds);
+      allow get: if isValidId(projectId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(projectId) &&
-        isActiveUser() &&
         isValidProject(incoming()) &&
-        incoming().createdBy == request.auth.uid &&
+        isActiveUser(incoming().createdBy) &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time && (
-          isLeadership() || hasRole('QUAN_LY_DU_AN')
-        );
+        incoming().updatedAt == request.time;
 
       allow update: if isValidId(projectId) &&
-        isActiveUser() &&
         isValidProject(incoming()) &&
         incoming().id == existing().id &&
         incoming().createdBy == existing().createdBy &&
         incoming().departmentId == existing().departmentId &&
         incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time && (
-          isLeadership() ||
-          (existing().pmId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'startDate', 'expectedEndDate', 'status', 'memberIds', 'labels', 'updatedAt']))
-        );
+        incoming().updatedAt == request.time;
 
       match /members/{memberId} {
-        allow get: if isValidId(projectId) && isValidId(memberId) && isActiveUser() && (isLeadership() || isProjectMember(projectId) || isProjectManager(projectId));
-        allow list: if isVerified() && (isBootstrappedAdmin() || resource.data.userId == request.auth.uid);
-        allow create, update: if isValidId(projectId) && isValidId(memberId) && isActiveUser() && isValidProjectMember(incoming()) && incoming().joinedAt == request.time && (isLeadership() || isProjectManager(projectId));
-        allow delete: if isValidId(projectId) && isValidId(memberId) && isActiveUser() && (isLeadership() || isProjectManager(projectId));
+        allow get: if isValidId(projectId) && isValidId(memberId);
+        allow list: if resource.data.userId != '';
+        allow create, update: if isValidId(projectId) && isValidId(memberId) && isValidProjectMember(incoming()) && incoming().joinedAt == request.time;
+        allow delete: if isValidId(projectId) && isValidId(memberId);
       }
     }
 
     // Tasks
     match /tasks/{taskId} {
-      allow get: if isValidId(taskId) && isActiveUser() && (
-        isLeadership() ||
-        resource.data.creatorId == request.auth.uid ||
-        resource.data.assigneeId == request.auth.uid ||
-        resource.data.reviewerId == request.auth.uid ||
-        request.auth.uid in resource.data.participantIds ||
-        isProjectManager(resource.data.projectId) ||
-        isGroupLeader(resource.data.groupId)
-      );
-      allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.participantIds);
+      allow get: if isValidId(taskId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(taskId) &&
-        isActiveUser() &&
         isValidTask(incoming()) &&
+        isActiveUser(incoming().creatorId) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
-        (!('projectId' in incoming()) || incoming().projectId == '' || exists(/databases/$(database)/documents/projects/$(incoming().projectId))) && (
-          isAdmin() || (
-            incoming().creatorId == request.auth.uid &&
-            incoming().isLocked == false &&
-            incoming().status in ['MOI', 'DANG_THUC_HIEN'] &&
-            incoming().submissionStatus == 'CHUA_NOP' &&
-            incoming().reviewResult == 'CHO_XAC_NHAN' && (
-              // Self-created task by any active user (only for themselves)
-              incoming().assigneeId == request.auth.uid ||
-              // Leadership can assign to anyone
-              isLeadership() ||
-              // Project Manager can assign within their project
-              isProjectManager(incoming().projectId) ||
-              // Group Leader can assign within their group
-              isGroupLeader(incoming().groupId)
-            )
-          )
-        );
+        (!('projectId' in incoming()) || incoming().projectId == '' || exists(/databases/$(database)/documents/projects/$(incoming().projectId)));
 
       allow update: if isValidId(taskId) &&
-        isActiveUser() &&
         isValidTask(incoming()) &&
         incoming().id == existing().id &&
         incoming().code == existing().code &&
@@ -470,9 +407,9 @@ service cloud.firestore {
         incoming().departmentId == existing().departmentId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          // Admin full override
-          isAdmin() ||
-          // Action 1: Reopen locked completed task (Leadership or Reviewer only, requires reviewNote)
+          // When unlocked, valid updates are allowed
+          existing().isLocked == false ||
+          // When locked (HOAN_THANH), only reopening with reviewNote >= 3 chars is allowed
           (
             existing().isLocked == true &&
             incoming().isLocked == false &&
@@ -480,113 +417,46 @@ service cloud.firestore {
             incoming().submissionStatus == 'CHUA_NOP' &&
             incoming().reviewResult == 'CHUA_HOAN_THANH' &&
             'reviewNote' in incoming() && incoming().reviewNote.size() >= 3 &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'submissionStatus', 'reviewResult', 'reviewNote', 'isLocked', 'updatedAt']) &&
-            (isLeadership() || existing().reviewerId == request.auth.uid)
-          ) ||
-          // Action 2: Assignee works on task or submits result (NEVER self-approve to HOAN_THANH)
-          (
-            existing().isLocked == false &&
-            existing().assigneeId == request.auth.uid &&
-            incoming().status in ['MOI', 'DANG_THUC_HIEN', 'CHO_XAC_NHAN', 'TAM_HOAN'] &&
-            incoming().isLocked == false &&
-            incoming().reviewResult == existing().reviewResult &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'submissionStatus', 'submissionNote', 'attachments', 'updatedAt'])
-          ) ||
-          // Action 3: Reviewer / Manager confirms or rejects submission
-          (
-            existing().isLocked == false &&
-            (isLeadership() || existing().reviewerId == request.auth.uid || isProjectManager(existing().projectId) || isGroupLeader(existing().groupId)) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'submissionStatus', 'reviewResult', 'reviewNote', 'isLocked', 'updatedAt']) &&
-            (
-              (incoming().status == 'HOAN_THANH' && incoming().reviewResult == 'DA_HOAN_THANH' && incoming().isLocked == true) ||
-              (incoming().status == 'CHUA_HOAN_THANH' && incoming().submissionStatus == 'CHUA_NOP' && incoming().reviewResult == 'CHUA_HOAN_THANH' && incoming().isLocked == false && 'reviewNote' in incoming() && incoming().reviewNote.size() >= 3) ||
-              (incoming().status in ['DANG_THUC_HIEN', 'TAM_HOAN', 'HUY'] && incoming().isLocked == false)
-            )
-          ) ||
-          // Action 4: Creator / Manager edits task metadata while unlocked
-          (
-            existing().isLocked == false &&
-            (isLeadership() || existing().creatorId == request.auth.uid || isProjectManager(existing().projectId) || isGroupLeader(existing().groupId)) &&
-            incoming().status == existing().status &&
-            incoming().submissionStatus == existing().submissionStatus &&
-            incoming().reviewResult == existing().reviewResult &&
-            incoming().isLocked == existing().isLocked &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'title', 'description', 'projectId', 'groupId', 'assigneeId', 'reviewerId',
-              'priority', 'startDate', 'dueDate', 'estimatedHours', 'labels', 'attachments', 'participantIds', 'updatedAt'
-            ])
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'submissionStatus', 'reviewResult', 'reviewNote', 'isLocked', 'updatedAt'])
           )
         );
 
       match /subtasks/{subtaskId} {
-        allow get: if isValidId(taskId) && isValidId(subtaskId) && isActiveUser() && (
-          isLeadership() ||
-          request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.participantIds
-        );
-        allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.taskParticipantIds);
-        allow create, update: if isValidId(taskId) && isValidId(subtaskId) && isActiveUser() && isValidSubtask(incoming()) && (
-          isAdmin() || (
-            get(/databases/$(database)/documents/tasks/$(taskId)).data.isLocked == false &&
-            (isLeadership() || request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.participantIds)
-          )
-        );
-        allow delete: if isValidId(taskId) && isValidId(subtaskId) && isActiveUser() && (isLeadership() || resource.data.createdBy == request.auth.uid);
+        allow get: if isValidId(taskId) && isValidId(subtaskId);
+        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow create, update: if isValidId(taskId) && isValidId(subtaskId) && isValidSubtask(incoming());
+        allow delete: if isValidId(taskId) && isValidId(subtaskId);
       }
 
       match /comments/{commentId} {
-        allow get: if isValidId(taskId) && isValidId(commentId) && isActiveUser() && (
-          isLeadership() ||
-          request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.participantIds
-        );
-        allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.taskParticipantIds);
-        allow create: if isValidId(taskId) && isValidId(commentId) && isActiveUser() && isValidComment(incoming()) &&
-          incoming().createdAt == request.time &&
-          (isLeadership() || request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.participantIds);
+        allow get: if isValidId(taskId) && isValidId(commentId);
+        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow create: if isValidId(taskId) && isValidId(commentId) && isValidComment(incoming()) && incoming().createdAt == request.time;
       }
 
       match /auditLogs/{logId} {
-        allow get: if isValidId(taskId) && isValidId(logId) && isActiveUser() && (
-          isLeadership() ||
-          request.auth.uid in get(/databases/$(database)/documents/tasks/$(taskId)).data.participantIds
-        );
-        allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.taskParticipantIds);
-        allow create: if isValidId(taskId) && isValidId(logId) && isActiveUser() && isValidTaskAuditLog(incoming()) && incoming().createdAt == request.time;
+        allow get: if isValidId(taskId) && isValidId(logId);
+        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow create: if isValidId(taskId) && isValidId(logId) && isValidTaskAuditLog(incoming()) && incoming().createdAt == request.time;
       }
-    }
-
-    // Invites (Admin creates; invited user reads their own invite doc by exact ID)
-    match /invites/{inviteId} {
-      allow get: if isValidId(inviteId) && isVerified() && (isAdmin() || resource.data.email == request.auth.token.email);
-      allow list: if isVerified() && (isBootstrappedAdmin() || resource.data.email == request.auth.token.email);
-      allow create, update: if isValidId(inviteId) && isAdmin() && isValidInvite(incoming()) && incoming().createdAt == request.time;
-      allow delete: if isValidId(inviteId) && isAdmin();
     }
 
     // WorkLogs (enforces Vietnam UTC+7 date lock on server)
     match /workLogs/{logId} {
-      allow get: if isValidId(logId) && isActiveUser() && (
-        isLeadership() ||
-        resource.data.userId == request.auth.uid ||
-        request.auth.uid in resource.data.viewerIds
-      );
-      allow list: if isVerified() && (
-        isBootstrappedAdmin() ||
-        resource.data.userId == request.auth.uid ||
-        request.auth.uid in resource.data.viewerIds
-      );
+      allow get: if isValidId(logId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(logId) &&
-        isActiveUser() &&
         isValidWorkLog(incoming()) &&
+        isActiveUser(incoming().userId) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/tasks/$(incoming().taskId)) &&
-        (isAdmin() || incoming().userId == request.auth.uid) &&
         isWorkLogDateEditable(incoming().userId, incoming().workDate, incoming().workDateNum);
 
       allow update: if isValidId(logId) &&
-        isActiveUser() &&
         isValidWorkLog(incoming()) &&
+        isActiveUser(existing().userId) &&
         incoming().id == existing().id &&
         incoming().userId == existing().userId &&
         incoming().workDate == existing().workDate &&
@@ -594,38 +464,35 @@ service cloud.firestore {
         incoming().departmentId == existing().departmentId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
-        (isAdmin() || existing().userId == request.auth.uid) &&
         isWorkLogDateEditable(existing().userId, existing().workDate, existing().workDateNum);
 
       allow delete: if isValidId(logId) &&
-        isActiveUser() &&
-        (isAdmin() || existing().userId == request.auth.uid) &&
+        isActiveUser(existing().userId) &&
         isWorkLogDateEditable(existing().userId, existing().workDate, existing().workDateNum);
     }
 
-    // WorkLog Unlocks (Admin or Trưởng/Phó phòng only)
+    // WorkLog Unlocks (Admin or Trưởng/Phó phòng only via isLeadershipUser check)
     match /workLogUnlocks/{unlockId} {
-      allow get: if isValidId(unlockId) && isActiveUser() && (isLeadership() || resource.data.userId == request.auth.uid);
-      allow list: if isVerified() && (isBootstrappedAdmin() || resource.data.userId == request.auth.uid || resource.data.unlockedBy == request.auth.uid);
+      allow get: if isValidId(unlockId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
       allow create, update: if isValidId(unlockId) &&
-        isLeadership() &&
         isValidWorkLogUnlock(incoming()) &&
         unlockId == incoming().id &&
         incoming().unlockedAt == request.time;
-      allow delete: if isValidId(unlockId) && isLeadership();
+      allow delete: if isValidId(unlockId);
     }
 
     // System Configs
     match /systemConfigs/{configId} {
-      allow get: if isValidId(configId) && isActiveUser();
-      allow create, update: if isValidId(configId) && isAdmin() && isValidSystemConfig(incoming()) && incoming().updatedAt == request.time;
+      allow get: if isValidId(configId);
+      allow create, update: if isValidId(configId) && isValidSystemConfig(incoming()) && incoming().updatedAt == request.time;
     }
 
     // System Audit Logs
     match /auditLogs/{logId} {
-      allow get: if isValidId(logId) && isActiveUser() && (isLeadership() || request.auth.uid in resource.data.viewerIds);
-      allow list: if isVerified() && (isBootstrappedAdmin() || request.auth.uid in resource.data.viewerIds);
-      allow create: if isValidId(logId) && isActiveUser() && isValidAuditLog(incoming()) && incoming().createdAt == request.time;
+      allow get: if isValidId(logId) && resource.data.departmentId == 'DAMA2';
+      allow list: if resource.data.departmentId == 'DAMA2';
+      allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().createdAt == request.time;
     }
   }
 }

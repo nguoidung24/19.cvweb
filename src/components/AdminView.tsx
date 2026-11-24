@@ -1,5 +1,16 @@
 import React, { useState } from 'react';
-import { Database, Edit3, Lock, Plus, Settings, Shield, Unlock, Users, X } from 'lucide-react';
+import {
+  Database,
+  Edit3,
+  KeyRound,
+  Lock,
+  Plus,
+  Settings,
+  Shield,
+  Unlock,
+  Users,
+  X,
+} from 'lucide-react';
 import {
   ROLE_LABELS,
   RoleCode,
@@ -10,9 +21,11 @@ import {
 } from '../types/domain';
 import {
   fetchUserEmailForAdmin,
+  resetUserPasswordByAdmin,
   saveGroupByAdmin,
   saveSystemConfigByAdmin,
   saveUserByAdmin,
+  toggleUserLockByAdmin,
 } from '../lib/firestoreService';
 import { canManageUsers } from '../lib/rbac';
 import { seedDepartmentData } from '../lib/seedData';
@@ -41,6 +54,8 @@ export function AdminView({
   // User modal
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
+  const [uUsername, setUUsername] = useState('');
+  const [uInitialPassword, setUInitialPassword] = useState('');
   const [uEmail, setUEmail] = useState('');
   const [uName, setUName] = useState('');
   const [uCode, setUCode] = useState('');
@@ -49,7 +64,17 @@ export function AdminView({
   const [uGroupId, setUGroupId] = useState(groups[0]?.id || 'grp_1');
   const [uManagerId, setUManagerId] = useState(currentUser.uid);
   const [uActive, setUActive] = useState(true);
+  const [userModalError, setUserModalError] = useState('');
   const [savingUser, setSavingUser] = useState(false);
+
+  // Reset password modal
+  const [resetTargetUser, setResetTargetUser] = useState<UserProfile | null>(null);
+  const [resetUsername, setResetUsername] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirm, setResetConfirm] = useState('');
+  const [resetMustChange, setResetMustChange] = useState(true);
+  const [resetError, setResetError] = useState('');
+  const [resetting, setResetting] = useState(false);
 
   // Group edit
   const [editingGroup, setEditingGroup] = useState<WorkGroup | null>(null);
@@ -65,8 +90,10 @@ export function AdminView({
   const [labelsInput, setLabelsInput] = useState((config?.defaultLabels || []).join(', '));
   const [seeding, setSeeding] = useState(false);
 
-  async function openCreateUser() {
+  function openCreateUser() {
     setEditingUser(null);
+    setUUsername('');
+    setUInitialPassword('');
     setUEmail('');
     setUName('');
     setUCode(`CV-${users.length + 1}`);
@@ -75,12 +102,15 @@ export function AdminView({
     setUGroupId(groups[0]?.id || 'grp_1');
     setUManagerId(currentUser.uid);
     setUActive(true);
+    setUserModalError('');
     setUserModalOpen(true);
   }
 
   async function openEditUser(u: UserProfile) {
     setEditingUser(u);
     const email = await fetchUserEmailForAdmin(u.uid);
+    setUUsername(u.username || '');
+    setUInitialPassword('');
     setUEmail(email);
     setUName(u.fullName);
     setUCode(u.employeeCode);
@@ -89,27 +119,39 @@ export function AdminView({
     setUGroupId(u.groupId || 'grp_1');
     setUManagerId(u.managerId || currentUser.uid);
     setUActive(u.isActive);
+    setUserModalError('');
     setUserModalOpen(true);
+  }
+
+  function openResetModal(u: UserProfile) {
+    setResetTargetUser(u);
+    setResetUsername(u.username || u.employeeCode.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    setResetPassword('');
+    setResetConfirm('');
+    setResetMustChange(true);
+    setResetError('');
   }
 
   function toggleRole(r: RoleCode) {
     setURoles((prev) =>
-      prev.includes(r)
-        ? prev.length > 1
-          ? prev.filter((x) => x !== r)
-          : prev
-        : [...prev, r]
+      prev.includes(r) ? (prev.length > 1 ? prev.filter((x) => x !== r) : prev) : [...prev, r]
     );
   }
 
   async function handleSaveUser(e: React.FormEvent) {
     e.preventDefault();
-    if (!uName.trim() || !uCode.trim()) return;
+    setUserModalError('');
+    if (!uName.trim() || !uCode.trim()) {
+      setUserModalError('Vui lòng nhập đầy đủ mã nhân viên và họ tên.');
+      return;
+    }
     setSavingUser(true);
     try {
       await saveUserByAdmin({
         existing: editingUser || undefined,
         input: {
+          username: uUsername,
+          initialPassword: uInitialPassword,
           email: uEmail,
           fullName: uName,
           employeeCode: uCode,
@@ -123,27 +165,50 @@ export function AdminView({
         allUsers: users,
       });
       setUserModalOpen(false);
-      onNotify(editingUser ? 'Đã cập nhật hồ sơ nhân sự.' : 'Đã tạo tài khoản nhân sự mới.');
+      onNotify(
+        editingUser
+          ? 'Đã cập nhật hồ sơ nhân sự.'
+          : 'Đã tạo tài khoản mới (người dùng sẽ phải đổi mật khẩu ở lần đăng nhập đầu).'
+      );
+    } catch (err) {
+      setUserModalError(err instanceof Error ? err.message : 'Không thể lưu tài khoản nhân sự.');
     } finally {
       setSavingUser(false);
     }
   }
 
+  async function handleResetPasswordSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!resetTargetUser) return;
+    setResetError('');
+    if (resetPassword !== resetConfirm) {
+      setResetError('Mật khẩu xác nhận không khớp.');
+      return;
+    }
+    setResetting(true);
+    try {
+      await resetUserPasswordByAdmin({
+        targetUser: resetTargetUser,
+        usernameInput: resetUsername,
+        newPassword: resetPassword,
+        requireChangeOnNextLogin: resetMustChange,
+        actor: currentUser,
+        allUsers: users,
+      });
+      setResetTargetUser(null);
+      onNotify(`Đã đặt lại mật khẩu cho ${resetTargetUser.fullName}.`);
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : 'Không thể đặt lại mật khẩu.');
+    } finally {
+      setResetting(false);
+    }
+  }
+
   async function handleToggleLockUser(u: UserProfile) {
     if (!isAdmin || u.uid === currentUser.uid) return;
-    const email = await fetchUserEmailForAdmin(u.uid);
-    await saveUserByAdmin({
-      existing: u,
-      input: {
-        email,
-        fullName: u.fullName,
-        employeeCode: u.employeeCode,
-        title: u.title || '',
-        roles: u.roles,
-        groupId: u.groupId || 'grp_1',
-        managerId: u.managerId || '',
-        isActive: !u.isActive,
-      },
+    await toggleUserLockByAdmin({
+      targetUser: u,
+      nextActive: !u.isActive,
       actor: currentUser,
       allUsers: users,
     });
@@ -208,7 +273,7 @@ export function AdminView({
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            Nhân sự & Vai trò ({users.length})
+            Nhân sự & Tài khoản ({users.length})
           </button>
           <button
             type="button"
@@ -258,7 +323,7 @@ export function AdminView({
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 whitespace-nowrap"
             >
               <Plus className="w-3.5 h-3.5" />
-              Thêm nhân sự
+              Tạo tài khoản nhân sự
             </button>
           </div>
         )}
@@ -271,6 +336,7 @@ export function AdminView({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
                   <th className="py-2.5 px-4">Mã NV</th>
+                  <th className="py-2.5 px-4">Tài khoản</th>
                   <th className="py-2.5 px-4">Họ và tên</th>
                   <th className="py-2.5 px-4">Nhóm</th>
                   <th className="py-2.5 px-4">Vai trò RBAC</th>
@@ -288,6 +354,9 @@ export function AdminView({
                       <td className="py-2.5 px-4 font-mono text-xs text-slate-600 whitespace-nowrap">
                         {u.employeeCode}
                       </td>
+                      <td className="py-2.5 px-4 font-mono text-xs text-slate-700 whitespace-nowrap">
+                        {u.username ? `@${u.username}` : <span className="text-slate-400">—</span>}
+                      </td>
                       <td className="py-2.5 px-4">
                         <div className="font-medium text-slate-900">{u.fullName}</div>
                         <div className="text-xs text-slate-500">{u.title || '—'}</div>
@@ -302,12 +371,16 @@ export function AdminView({
                         {mgr?.fullName || '—'}
                       </td>
                       <td className="py-2.5 px-4 text-xs whitespace-nowrap">
-                        <span className={u.isActive ? 'text-emerald-700 font-medium' : 'text-red-700 font-medium'}>
+                        <span
+                          className={
+                            u.isActive ? 'text-emerald-700 font-medium' : 'text-red-700 font-medium'
+                          }
+                        >
                           {u.isActive ? 'Đang hoạt động' : 'Đã khóa'}
                         </span>
                       </td>
                       {isAdmin && (
-                        <td className="py-2.5 px-4 text-right whitespace-nowrap space-x-2">
+                        <td className="py-2.5 px-4 text-right whitespace-nowrap space-x-3">
                           <button
                             type="button"
                             onClick={() => openEditUser(u)}
@@ -315,6 +388,14 @@ export function AdminView({
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                             Sửa
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openResetModal(u)}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 hover:underline"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            Đặt lại MK
                           </button>
                           {u.uid !== currentUser.uid && (
                             <button
@@ -499,13 +580,13 @@ export function AdminView({
         </div>
       )}
 
-      {/* User Modal */}
+      {/* Create / Edit User Modal */}
       {userModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
           <div className="bg-white border border-slate-200 rounded-xl w-full max-w-lg max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
               <h3 className="text-base font-semibold text-slate-900">
-                {editingUser ? `Cập nhật ${editingUser.fullName}` : 'Thêm nhân sự mới'}
+                {editingUser ? `Cập nhật ${editingUser.fullName}` : 'Tạo tài khoản nhân sự mới'}
               </h3>
               <button
                 type="button"
@@ -516,9 +597,15 @@ export function AdminView({
               </button>
             </div>
             <form onSubmit={handleSaveUser} className="overflow-y-auto px-6 py-5 space-y-4">
+              {userModalError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                  {userModalError}
+                </div>
+              )}
+
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Mã NV</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Mã NV *</label>
                   <input
                     type="text"
                     required
@@ -528,7 +615,9 @@ export function AdminView({
                   />
                 </div>
                 <div className="col-span-2">
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Họ và tên</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Họ và tên *
+                  </label>
                   <input
                     type="text"
                     required
@@ -542,7 +631,57 @@ export function AdminView({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Email công việc (dùng để đăng nhập)
+                    Tên đăng nhập *
+                  </label>
+                  <input
+                    type="text"
+                    required={!editingUser}
+                    disabled={Boolean(editingUser?.username)}
+                    value={uUsername}
+                    onChange={(e) => setUUsername(e.target.value.toLowerCase())}
+                    placeholder="vd: nguyen_an"
+                    className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-500"
+                  />
+                </div>
+                {!editingUser ? (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Mật khẩu khởi tạo *
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={uInitialPassword}
+                      onChange={(e) => setUInitialPassword(e.target.value)}
+                      placeholder="Ít nhất 8 ký tự mạnh"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Chức danh
+                    </label>
+                    <input
+                      type="text"
+                      value={uTitle}
+                      onChange={(e) => setUTitle(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {!editingUser && (
+                <p className="text-[11px] text-slate-500 -mt-2">
+                  Mật khẩu phải gồm ít nhất 8 ký tự (chữ hoa, chữ thường, số và ký tự đặc biệt). Nhân sự sẽ bắt buộc đổi mật khẩu ở lần đăng nhập đầu tiên.
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Email liên hệ (không dùng đăng nhập)
                   </label>
                   <input
                     type="email"
@@ -552,15 +691,19 @@ export function AdminView({
                     className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Chức danh</label>
-                  <input
-                    type="text"
-                    value={uTitle}
-                    onChange={(e) => setUTitle(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
-                  />
-                </div>
+                {!editingUser && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Chức danh
+                    </label>
+                    <input
+                      type="text"
+                      value={uTitle}
+                      onChange={(e) => setUTitle(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -648,6 +791,103 @@ export function AdminView({
         </div>
       )}
 
+      {/* Reset Password Modal */}
+      {resetTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-900">
+                Đặt lại mật khẩu · {resetTargetUser.fullName}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setResetTargetUser(null)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {resetError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                {resetError}
+              </div>
+            )}
+
+            <form onSubmit={handleResetPasswordSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Tên đăng nhập
+                </label>
+                <input
+                  type="text"
+                  required
+                  disabled={Boolean(resetTargetUser.username)}
+                  value={resetUsername}
+                  onChange={(e) => setResetUsername(e.target.value.toLowerCase())}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg disabled:bg-slate-100 disabled:text-slate-600"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Mật khẩu mới
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={resetPassword}
+                  onChange={(e) => setResetPassword(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Tối thiểu 8 ký tự gồm chữ hoa, chữ thường, chữ số và ký tự đặc biệt.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Nhập lại mật khẩu mới
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={resetConfirm}
+                  onChange={(e) => setResetConfirm(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={resetMustChange}
+                  onChange={(e) => setResetMustChange(e.target.checked)}
+                />
+                <span>Bắt buộc đổi mật khẩu ở lần đăng nhập tiếp theo</span>
+              </label>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setResetTargetUser(null)}
+                  className="px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetting}
+                  className="px-3.5 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-50"
+                >
+                  {resetting ? 'Đang cập nhật...' : 'Xác nhận đặt lại'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Group Modal */}
       {editingGroup && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
@@ -685,7 +925,9 @@ export function AdminView({
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Trưởng nhóm</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Trưởng nhóm
+                </label>
                 <select
                   value={gLeader}
                   onChange={(e) => setGLeader(e.target.value)}

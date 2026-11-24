@@ -30,6 +30,7 @@ export type ReviewResult = 'CHO_XAC_NHAN' | 'DA_HOAN_THANH' | 'CHUA_HOAN_THANH';
 
 export interface UserProfile {
   uid: string;
+  username?: string;
   authUid?: string;
   employeeCode: string;
   fullName: string;
@@ -39,7 +40,20 @@ export interface UserProfile {
   managerId?: string;
   isActive: boolean;
   departmentId: string;
-  email?: string; // Hydrated only for owner/leadership from private subcollection or invite
+  email?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface AuthCredential {
+  username: string;
+  userId: string;
+  passwordHash: string;
+  mustChangePassword: boolean;
+  isActive: boolean;
+  failedAttempts: number;
+  lockedUntil?: number;
+  departmentId: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -183,7 +197,7 @@ export interface SystemAuditLog {
 }
 
 export const DEPARTMENT_ID = 'DAMA2';
-export const BOOTSTRAP_ADMIN_EMAIL = 'dungtamtithoi24@gmail.com';
+export const DEFAULT_ADMIN_USERNAME = 'mbfs_admin';
 
 export const ROLE_LABELS: Record<RoleCode, string> = {
   ADMIN: 'Quản trị hệ thống',

@@ -11,7 +11,8 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
-  BOOTSTRAP_ADMIN_EMAIL,
+  AuthCredential,
+  DEFAULT_ADMIN_USERNAME,
   DEPARTMENT_ID,
   Project,
   ProjectStatus,
@@ -25,17 +26,293 @@ import {
   UserProfile,
   WorkGroup,
 } from '../types/domain';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import {
+  DEFAULT_ADMIN_BOOTSTRAP_HASH,
+  hashPassword,
+  validatePasswordStrength,
+  verifyPassword,
+} from './cryptoAuth';
+import { db, handleFirestoreError, OperationType } from './firebase';
 import { buildParticipantIds } from './rbac';
 import { dateStrToNum, getVietnamNowParts } from './time';
 
-export function sanitizeEmailId(email: string): string {
-  return email.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+const SESSION_STORAGE_KEY = 'dama2_session';
+
+export interface StoredSession {
+  userId: string;
+  username: string;
+}
+
+export function normalizeUsername(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+export function isValidUsernameFormat(username: string): boolean {
+  return (
+    username.length >= 2 &&
+    username.length <= 64 &&
+    /^[a-z0-9._-]+$/.test(username)
+  );
 }
 
 export function makeId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 8);
   return `${prefix}_${Date.now().toString(36)}_${rand}`;
+}
+
+export function saveSession(session: StoredSession): void {
+  sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+export function logoutSession(): void {
+  sessionStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+export async function restoreCurrentSession(): Promise<{
+  user: UserProfile;
+  mustChangePassword: boolean;
+} | null> {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredSession>;
+    const username = normalizeUsername(parsed.username || '');
+    const userId = (parsed.userId || '').trim();
+    if (!username || !userId || !isValidUsernameFormat(username)) {
+      logoutSession();
+      return null;
+    }
+
+    const [credSnap, userSnap] = await Promise.all([
+      getDoc(doc(db, 'authCredentials', username)),
+      getDoc(doc(db, 'users', userId)),
+    ]);
+
+    if (!credSnap.exists() || !userSnap.exists()) {
+      logoutSession();
+      return null;
+    }
+
+    const cred = credSnap.data() as AuthCredential;
+    const user = userSnap.data() as UserProfile;
+
+    if (!cred.isActive || !user.isActive || cred.userId !== user.uid) {
+      logoutSession();
+      return null;
+    }
+
+    return {
+      user: { ...user, username },
+      mustChangePassword: Boolean(cred.mustChangePassword),
+    };
+  } catch {
+    logoutSession();
+    return null;
+  }
+}
+
+export async function loginWithUsernamePassword(
+  usernameInput: string,
+  password: string
+): Promise<{
+  user: UserProfile;
+  mustChangePassword: boolean;
+}> {
+  const username = normalizeUsername(usernameInput);
+  if (!isValidUsernameFormat(username) || !password) {
+    throw new Error('Tên đăng nhập hoặc mật khẩu không hợp lệ.');
+  }
+
+  const credRef = doc(db, 'authCredentials', username);
+  let credSnap;
+  try {
+    credSnap = await getDoc(credRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `authCredentials/${username}`);
+  }
+
+  // Bootstrap default admin mbfs_admin on very first login if not yet created in Firestore
+  if (!credSnap.exists()) {
+    if (username !== DEFAULT_ADMIN_USERNAME) {
+      throw new Error('Tên đăng nhập hoặc mật khẩu không đúng.');
+    }
+
+    const matchesBootstrap = await verifyPassword(
+      password,
+      DEFAULT_ADMIN_BOOTSTRAP_HASH
+    );
+    if (!matchesBootstrap) {
+      throw new Error('Tên đăng nhập hoặc mật khẩu không đúng.');
+    }
+
+    const adminUid = 'usr_mbfs_admin';
+    const userRef = doc(db, 'users', adminUid);
+    const existingAdminUser = await getDoc(userRef);
+
+    const adminProfile: UserProfile = existingAdminUser.exists()
+      ? ({ ...(existingAdminUser.data() as UserProfile), username } as UserProfile)
+      : {
+          uid: adminUid,
+          username,
+          employeeCode: 'AD-01',
+          fullName: 'Quản trị hệ thống',
+          title: 'Quản trị viên / Trưởng phòng',
+          roles: ['ADMIN', 'TRUONG_PHONG'],
+          groupId: 'grp_1',
+          managerId: adminUid,
+          isActive: true,
+          departmentId: DEPARTMENT_ID,
+        };
+
+    try {
+      if (!existingAdminUser.exists()) {
+        await setDoc(userRef, {
+          ...adminProfile,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else if (existingAdminUser.data()?.username !== username) {
+        await updateDoc(userRef, {
+          username,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await setDoc(credRef, {
+        username,
+        userId: adminUid,
+        passwordHash: DEFAULT_ADMIN_BOOTSTRAP_HASH,
+        mustChangePassword: true,
+        isActive: true,
+        failedAttempts: 0,
+        lockedUntil: 0,
+        departmentId: DEPARTMENT_ID,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `authCredentials/${username}`);
+    }
+
+    saveSession({ userId: adminUid, username });
+    return {
+      user: adminProfile,
+      mustChangePassword: true,
+    };
+  }
+
+  const cred = credSnap.data() as AuthCredential;
+
+  if (!cred.isActive) {
+    throw new Error('Tài khoản đang bị tạm khóa. Vui lòng liên hệ Quản trị viên phòng ban.');
+  }
+
+  if (cred.lockedUntil && cred.lockedUntil > Date.now()) {
+    const minutesLeft = Math.max(1, Math.ceil((cred.lockedUntil - Date.now()) / 60000));
+    throw new Error(
+      `Tài khoản tạm thời bị khóa do nhập sai mật khẩu nhiều lần. Vui lòng thử lại sau ${minutesLeft} phút.`
+    );
+  }
+
+  const isPasswordValid = await verifyPassword(password, cred.passwordHash);
+  if (!isPasswordValid) {
+    const nextAttempts = (cred.failedAttempts || 0) + 1;
+    const shouldLock = nextAttempts >= 5;
+    try {
+      await updateDoc(credRef, {
+        failedAttempts: shouldLock ? 0 : nextAttempts,
+        lockedUntil: shouldLock ? Date.now() + 5 * 60 * 1000 : 0,
+        updatedAt: serverTimestamp(),
+      });
+    } catch {
+      // Non-fatal if counter update fails
+    }
+    if (shouldLock) {
+      throw new Error(
+        'Bạn đã nhập sai mật khẩu 5 lần liên tiếp. Tài khoản tạm khóa trong 5 phút.'
+      );
+    }
+    throw new Error(
+      `Tên đăng nhập hoặc mật khẩu không đúng (còn ${5 - nextAttempts} lần thử).`
+    );
+  }
+
+  const userSnap = await getDoc(doc(db, 'users', cred.userId));
+  if (!userSnap.exists()) {
+    throw new Error('Không tìm thấy hồ sơ nhân sự cho tài khoản này.');
+  }
+  const user = userSnap.data() as UserProfile;
+  if (!user.isActive) {
+    throw new Error('Tài khoản nhân sự hiện đang bị khóa. Vui lòng liên hệ Quản trị viên.');
+  }
+
+  if ((cred.failedAttempts || 0) > 0 || (cred.lockedUntil || 0) > 0) {
+    try {
+      await updateDoc(credRef, {
+        failedAttempts: 0,
+        lockedUntil: 0,
+        updatedAt: serverTimestamp(),
+      });
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  saveSession({ userId: user.uid, username });
+  return {
+    user: { ...user, username },
+    mustChangePassword: Boolean(cred.mustChangePassword),
+  };
+}
+
+export async function changeOwnPassword(params: {
+  username: string;
+  currentPassword: string;
+  newPassword: string;
+}): Promise<void> {
+  const username = normalizeUsername(params.username);
+  if (!isValidUsernameFormat(username)) {
+    throw new Error('Không xác định được tài khoản đang đăng nhập.');
+  }
+  if (!params.currentPassword) {
+    throw new Error('Vui lòng nhập mật khẩu hiện tại.');
+  }
+  if (params.newPassword === params.currentPassword) {
+    throw new Error('Mật khẩu mới phải khác mật khẩu hiện tại.');
+  }
+  const strengthError = validatePasswordStrength(params.newPassword);
+  if (strengthError) {
+    throw new Error(strengthError);
+  }
+
+  const credRef = doc(db, 'authCredentials', username);
+  const credSnap = await getDoc(credRef);
+  if (!credSnap.exists()) {
+    throw new Error('Không tìm thấy thông tin xác thực của tài khoản.');
+  }
+
+  const cred = credSnap.data() as AuthCredential;
+  if (!cred.isActive) {
+    throw new Error('Tài khoản đang bị khóa, không thể đổi mật khẩu.');
+  }
+
+  const validCurrent = await verifyPassword(params.currentPassword, cred.passwordHash);
+  if (!validCurrent) {
+    throw new Error('Mật khẩu hiện tại không chính xác.');
+  }
+
+  const newHash = await hashPassword(params.newPassword);
+  try {
+    await updateDoc(credRef, {
+      passwordHash: newHash,
+      mustChangePassword: false,
+      failedAttempts: 0,
+      lockedUntil: 0,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `authCredentials/${username}`);
+  }
 }
 
 export async function logSystemAudit(params: {
@@ -51,7 +328,12 @@ export async function logSystemAudit(params: {
     new Set([
       params.actor.uid,
       ...params.allUsers
-        .filter((u) => u.roles.includes('ADMIN') || u.roles.includes('TRUONG_PHONG') || u.roles.includes('PHO_PHONG'))
+        .filter(
+          (u) =>
+            u.roles.includes('ADMIN') ||
+            u.roles.includes('TRUONG_PHONG') ||
+            u.roles.includes('PHO_PHONG')
+        )
         .map((u) => u.uid),
     ])
   ).slice(0, 30);
@@ -94,113 +376,6 @@ export async function logTaskAudit(params: {
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, `tasks/${params.taskId}/auditLogs/${id}`);
-  }
-}
-
-export async function resolveOrBootstrapCurrentUser(): Promise<{
-  profile: UserProfile | null;
-  status: 'OK' | 'LOCKED' | 'NOT_INVITED';
-}> {
-  const current = auth.currentUser;
-  if (!current) return { profile: null, status: 'NOT_INVITED' };
-
-  const uid = current.uid;
-  const email = (current.email || '').toLowerCase();
-
-  try {
-    const userRef = doc(db, 'users', uid);
-    const snap = await getDoc(userRef);
-
-    if (snap.exists()) {
-      const data = snap.data() as UserProfile;
-      if (!data.isActive) {
-        return { profile: data, status: 'LOCKED' };
-      }
-      return { profile: { ...data, email }, status: 'OK' };
-    }
-
-    // Check if user is the bootstrapped admin email
-    if (email === BOOTSTRAP_ADMIN_EMAIL.toLowerCase()) {
-      const adminProfile: Omit<UserProfile, 'email'> = {
-        uid,
-        authUid: uid,
-        employeeCode: 'AD-01',
-        fullName: current.displayName || 'Quản trị viên Phòng ban',
-        title: 'Trưởng phòng / Quản trị hệ thống',
-        roles: ['ADMIN', 'TRUONG_PHONG'],
-        groupId: 'grp_1',
-        managerId: uid,
-        isActive: true,
-        departmentId: DEPARTMENT_ID,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-
-      const batch = writeBatch(db);
-      batch.set(userRef, adminProfile);
-      batch.set(doc(db, 'users', uid, 'private', 'info'), {
-        uid,
-        authUid: uid,
-        email,
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
-      return {
-        profile: { ...adminProfile, email } as UserProfile,
-        status: 'OK',
-      };
-    }
-
-    // Otherwise check invites/{sanitizedEmail}
-    if (email) {
-      const inviteId = sanitizeEmailId(email);
-      const inviteSnap = await getDoc(doc(db, 'invites', inviteId));
-      if (inviteSnap.exists()) {
-        const inv = inviteSnap.data() as {
-          roles: RoleCode[];
-          groupId?: string;
-          managerId?: string;
-          fullName: string;
-          employeeCode: string;
-          title?: string;
-          isActive: boolean;
-        };
-        if (!inv.isActive) {
-          return { profile: null, status: 'LOCKED' };
-        }
-        const claimedProfile: Omit<UserProfile, 'email'> = {
-          uid,
-          authUid: uid,
-          employeeCode: inv.employeeCode,
-          fullName: inv.fullName,
-          title: inv.title || 'Chuyên viên',
-          roles: inv.roles,
-          groupId: inv.groupId || 'grp_1',
-          managerId: inv.managerId || '',
-          isActive: inv.isActive,
-          departmentId: DEPARTMENT_ID,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        };
-        const batch = writeBatch(db);
-        batch.set(userRef, claimedProfile);
-        batch.set(doc(db, 'users', uid, 'private', 'info'), {
-          uid,
-          authUid: uid,
-          email,
-          updatedAt: serverTimestamp(),
-        });
-        await batch.commit();
-        return {
-          profile: { ...claimedProfile, email } as UserProfile,
-          status: 'OK',
-        };
-      }
-    }
-
-    return { profile: null, status: 'NOT_INVITED' };
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `users/${uid}`);
   }
 }
 
@@ -270,13 +445,11 @@ export async function createOrUpdateTask(params: {
     return;
   }
 
-  // Creating new task(s)
   const prefix = selectedProject
     ? selectedProject.code.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
     : 'TX';
   let seq = existingTaskCount + 1;
 
-  // If assigning to multiple users at once, create parent task + independent child tasks per assignee
   if (input.assigneeIds.length > 1) {
     const parentId = makeId('tsk');
     const parentCode = `${prefix}-${String(seq).padStart(2, '0')}`;
@@ -385,12 +558,10 @@ export async function createOrUpdateTask(params: {
     return;
   }
 
-  // Single assignee (either assigned or self-created)
   const assigneeId = input.assigneeIds[0] || actor.uid;
   const isSelfCreate = assigneeId === actor.uid;
   const reviewerId =
-    input.reviewerId ||
-    (isSelfCreate ? actor.managerId || actor.uid : actor.uid);
+    input.reviewerId || (isSelfCreate ? actor.managerId || actor.uid : actor.uid);
 
   const taskId = makeId('tsk');
   const code = `${prefix}-${String(seq).padStart(2, '0')}`;
@@ -498,7 +669,9 @@ export async function reviewTaskDecision(params: {
         taskId: task.id,
         actor,
         action: 'Xác nhận hoàn thành',
-        detail: note?.trim() ? `Xác nhận hoàn thành: ${note.trim()}` : 'Xác nhận hoàn thành và khóa công việc',
+        detail: note?.trim()
+          ? `Xác nhận hoàn thành: ${note.trim()}`
+          : 'Xác nhận hoàn thành và khóa công việc',
         participantIds: task.participantIds,
       });
     } else if (decision === 'REJECT') {
@@ -584,7 +757,11 @@ export async function batchApproveTasks(tasks: TaskItem[], actor: UserProfile): 
   }
 }
 
-export async function addSubtask(task: TaskItem, title: string, actor: UserProfile): Promise<void> {
+export async function addSubtask(
+  task: TaskItem,
+  title: string,
+  actor: UserProfile
+): Promise<void> {
   const id = makeId('sub');
   try {
     await setDoc(doc(db, 'tasks', task.id, 'subtasks', id), {
@@ -600,7 +777,11 @@ export async function addSubtask(task: TaskItem, title: string, actor: UserProfi
   }
 }
 
-export async function toggleSubtask(task: TaskItem, subtaskId: string, isDone: boolean): Promise<void> {
+export async function toggleSubtask(
+  task: TaskItem,
+  subtaskId: string,
+  isDone: boolean
+): Promise<void> {
   try {
     await updateDoc(doc(db, 'tasks', task.id, 'subtasks', subtaskId), {
       isDone,
@@ -651,7 +832,12 @@ export async function saveProject(params: {
   const { existing, input, actor, allUsers } = params;
   const id = existing ? existing.id : makeId('prj');
   const leadershipIds = allUsers
-    .filter((u) => u.roles.includes('ADMIN') || u.roles.includes('TRUONG_PHONG') || u.roles.includes('PHO_PHONG'))
+    .filter(
+      (u) =>
+        u.roles.includes('ADMIN') ||
+        u.roles.includes('TRUONG_PHONG') ||
+        u.roles.includes('PHO_PHONG')
+    )
     .map((u) => u.uid);
 
   const memberIds = Array.from(
@@ -731,7 +917,13 @@ export async function saveWorkLog(params: {
       userId,
       task.reviewerId,
       ...allUsers
-        .filter((u) => u.roles.includes('ADMIN') || u.roles.includes('TRUONG_PHONG') || u.roles.includes('PHO_PHONG') || (u.roles.includes('TRUONG_NHOM') && u.groupId === task.groupId))
+        .filter(
+          (u) =>
+            u.roles.includes('ADMIN') ||
+            u.roles.includes('TRUONG_PHONG') ||
+            u.roles.includes('PHO_PHONG') ||
+            (u.roles.includes('TRUONG_NHOM') && u.groupId === task.groupId)
+        )
         .map((u) => u.uid),
     ])
   ).slice(0, 30);
@@ -804,6 +996,8 @@ export async function unlockWorkLogDate(params: {
 export async function saveUserByAdmin(params: {
   existing?: UserProfile;
   input: {
+    username: string;
+    initialPassword?: string;
     email: string;
     fullName: string;
     employeeCode: string;
@@ -818,12 +1012,34 @@ export async function saveUserByAdmin(params: {
 }): Promise<void> {
   const { existing, input, actor, allUsers } = params;
   const uid = existing ? existing.uid : makeId('usr');
+  const username = normalizeUsername(existing?.username || input.username);
   const emailLower = input.email.trim().toLowerCase();
 
+  if (username && !isValidUsernameFormat(username)) {
+    throw new Error(
+      'Tên đăng nhập chỉ được chứa chữ thường (a-z), số (0-9), dấu chấm (.), gạch dưới (_) hoặc gạch ngang (-), độ dài 2–64 ký tự.'
+    );
+  }
+
+  if (!existing) {
+    if (!username) {
+      throw new Error('Vui lòng nhập tên đăng nhập cho tài khoản mới.');
+    }
+    const existingCredSnap = await getDoc(doc(db, 'authCredentials', username));
+    if (existingCredSnap.exists()) {
+      throw new Error(`Tên đăng nhập "${username}" đã tồn tại. Vui lòng chọn tên khác.`);
+    }
+    const pwd = input.initialPassword || '';
+    const strengthErr = validatePasswordStrength(pwd);
+    if (strengthErr) {
+      throw new Error(`Mật khẩu khởi tạo không đạt yêu cầu: ${strengthErr}`);
+    }
+  }
+
   try {
-    const batch = writeBatch(db);
     if (existing) {
-      batch.update(doc(db, 'users', uid), {
+      await updateDoc(doc(db, 'users', uid), {
+        ...(username ? { username } : {}),
         employeeCode: input.employeeCode.trim().slice(0, 32),
         fullName: input.fullName.trim().slice(0, 120),
         title: input.title.trim().slice(0, 120),
@@ -833,9 +1049,21 @@ export async function saveUserByAdmin(params: {
         isActive: input.isActive,
         updatedAt: serverTimestamp(),
       });
+
+      if (username) {
+        const credSnap = await getDoc(doc(db, 'authCredentials', username));
+        if (credSnap.exists()) {
+          await updateDoc(doc(db, 'authCredentials', username), {
+            isActive: input.isActive,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
     } else {
-      batch.set(doc(db, 'users', uid), {
+      // Commit users/{uid} first so firestore.rules userExists(incoming().userId) passes
+      await setDoc(doc(db, 'users', uid), {
         uid,
+        username,
         employeeCode: input.employeeCode.trim().slice(0, 32),
         fullName: input.fullName.trim().slice(0, 120),
         title: input.title.trim().slice(0, 120),
@@ -847,41 +1075,147 @@ export async function saveUserByAdmin(params: {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      const passwordHash = await hashPassword(input.initialPassword!);
+      await setDoc(doc(db, 'authCredentials', username), {
+        username,
+        userId: uid,
+        passwordHash,
+        mustChangePassword: true,
+        isActive: input.isActive,
+        failedAttempts: 0,
+        lockedUntil: 0,
+        departmentId: DEPARTMENT_ID,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
     }
 
     if (emailLower) {
-      batch.set(doc(db, 'users', uid, 'private', 'info'), {
+      await setDoc(doc(db, 'users', uid, 'private', 'info'), {
         uid,
         email: emailLower,
         updatedAt: serverTimestamp(),
       });
-      const inviteId = sanitizeEmailId(emailLower);
-      batch.set(doc(db, 'invites', inviteId), {
-        id: inviteId,
-        email: emailLower,
-        targetUserId: uid,
-        roles: input.roles,
-        groupId: input.groupId,
-        managerId: input.managerId,
-        fullName: input.fullName.trim().slice(0, 120),
-        employeeCode: input.employeeCode.trim().slice(0, 32),
-        title: input.title.trim().slice(0, 120),
-        isActive: input.isActive,
-        createdAt: serverTimestamp(),
-      });
     }
 
-    await batch.commit();
     await logSystemAudit({
       actor,
       action: existing ? 'Cập nhật nhân sự' : 'Tạo nhân sự mới',
       targetType: 'user',
       targetId: uid,
-      detail: `${existing ? 'Cập nhật' : 'Tạo mới'} ${input.fullName} (${input.employeeCode}) - Vai trò: ${input.roles.join(', ')}`,
+      detail: `${existing ? 'Cập nhật' : 'Tạo mới'} ${input.fullName} (${input.employeeCode}, @${username || 'chưa gắn TK'}) - Vai trò: ${input.roles.join(', ')}`,
       allUsers,
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
+  }
+}
+
+export async function toggleUserLockByAdmin(params: {
+  targetUser: UserProfile;
+  nextActive: boolean;
+  actor: UserProfile;
+  allUsers: UserProfile[];
+}): Promise<void> {
+  const { targetUser, nextActive, actor, allUsers } = params;
+  try {
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'users', targetUser.uid), {
+      isActive: nextActive,
+      updatedAt: serverTimestamp(),
+    });
+    if (targetUser.username) {
+      const credSnap = await getDoc(doc(db, 'authCredentials', targetUser.username));
+      if (credSnap.exists()) {
+        batch.update(doc(db, 'authCredentials', targetUser.username), {
+          isActive: nextActive,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+    await batch.commit();
+
+    await logSystemAudit({
+      actor,
+      action: nextActive ? 'Mở khóa tài khoản' : 'Khóa tài khoản',
+      targetType: 'user',
+      targetId: targetUser.uid,
+      detail: `${nextActive ? 'Mở khóa' : 'Khóa'} tài khoản ${targetUser.fullName} (@${targetUser.username || targetUser.employeeCode})`,
+      allUsers,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `users/${targetUser.uid}`);
+  }
+}
+
+export async function resetUserPasswordByAdmin(params: {
+  targetUser: UserProfile;
+  usernameInput?: string;
+  newPassword: string;
+  requireChangeOnNextLogin: boolean;
+  actor: UserProfile;
+  allUsers: UserProfile[];
+}): Promise<void> {
+  const { targetUser, usernameInput, newPassword, requireChangeOnNextLogin, actor, allUsers } =
+    params;
+
+  const username = normalizeUsername(targetUser.username || usernameInput || '');
+  if (!isValidUsernameFormat(username)) {
+    throw new Error(
+      'Tên đăng nhập không hợp lệ (2–64 ký tự gồm a-z, 0-9, dấu chấm, gạch dưới hoặc gạch ngang).'
+    );
+  }
+  const strengthError = validatePasswordStrength(newPassword);
+  if (strengthError) {
+    throw new Error(strengthError);
+  }
+
+  const passwordHash = await hashPassword(newPassword);
+  const credRef = doc(db, 'authCredentials', username);
+  const credSnap = await getDoc(credRef);
+
+  try {
+    if (!targetUser.username) {
+      await updateDoc(doc(db, 'users', targetUser.uid), {
+        username,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    if (credSnap.exists()) {
+      await updateDoc(credRef, {
+        passwordHash,
+        mustChangePassword: requireChangeOnNextLogin,
+        failedAttempts: 0,
+        lockedUntil: 0,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(credRef, {
+        username,
+        userId: targetUser.uid,
+        passwordHash,
+        mustChangePassword: requireChangeOnNextLogin,
+        isActive: targetUser.isActive,
+        failedAttempts: 0,
+        lockedUntil: 0,
+        departmentId: DEPARTMENT_ID,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await logSystemAudit({
+      actor,
+      action: 'Đặt lại mật khẩu',
+      targetType: 'user',
+      targetId: targetUser.uid,
+      detail: `Đặt lại mật khẩu cho ${targetUser.fullName} (@${username})${requireChangeOnNextLogin ? ' · Bắt buộc đổi MK lần sau' : ''}`,
+      allUsers,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `authCredentials/${username}`);
   }
 }
 
@@ -894,12 +1228,7 @@ export async function saveGroupByAdmin(params: {
   actor: UserProfile;
 }): Promise<void> {
   const { group, name, description, leaderId, allUsers, actor } = params;
-  const memberUids = Array.from(
-    new Set([
-      ...allUsers.map((u) => u.uid),
-      leaderId,
-    ])
-  ).slice(0, 50);
+  const memberUids = Array.from(new Set([...allUsers.map((u) => u.uid), leaderId])).slice(0, 50);
 
   try {
     await updateDoc(doc(db, 'groups', group.id), {
