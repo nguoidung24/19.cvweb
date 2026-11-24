@@ -9,6 +9,7 @@ import {
   updateDoc,
   where,
   writeBatch,
+  WriteBatch,
 } from 'firebase/firestore';
 import {
   AuthCredential,
@@ -66,6 +67,20 @@ export function saveSession(session: StoredSession): void {
 
 export function logoutSession(): void {
   sessionStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+export async function runBatchOps(
+  ops: Array<(batch: WriteBatch) => void>
+): Promise<void> {
+  const CHUNK_SIZE = 400;
+  for (let i = 0; i < ops.length; i += CHUNK_SIZE) {
+    const chunk = ops.slice(i, i + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const op of chunk) {
+      op(batch);
+    }
+    await batch.commit();
+  }
 }
 
 export async function restoreCurrentSession(): Promise<{
@@ -131,7 +146,7 @@ export async function loginWithUsernamePassword(
     handleFirestoreError(error, OperationType.GET, `authCredentials/${username}`);
   }
 
-  // Bootstrap default admin mbfs_admin on very first login if not yet created in Firestore
+  // Bootstrap default admin mbfs_admin on first login (ADMIN role only, NOT Trưởng phòng)
   if (!credSnap.exists()) {
     if (username !== DEFAULT_ADMIN_USERNAME) {
       throw new Error('Tên đăng nhập hoặc mật khẩu không đúng.');
@@ -156,10 +171,10 @@ export async function loginWithUsernamePassword(
           username,
           employeeCode: 'AD-01',
           fullName: 'Quản trị hệ thống',
-          title: 'Quản trị viên / Trưởng phòng',
-          roles: ['ADMIN', 'TRUONG_PHONG'],
-          groupId: 'grp_1',
-          managerId: adminUid,
+          title: 'Quản trị hệ thống',
+          roles: ['ADMIN'],
+          groupId: '',
+          managerId: '',
           isActive: true,
           departmentId: DEPARTMENT_ID,
         };
@@ -225,7 +240,7 @@ export async function loginWithUsernamePassword(
         updatedAt: serverTimestamp(),
       });
     } catch {
-      // Non-fatal if counter update fails
+      // Non-fatal
     }
     if (shouldLock) {
       throw new Error(
@@ -1046,11 +1061,11 @@ export async function saveUserByAdmin(params: {
         roles: input.roles,
         groupId: input.groupId,
         managerId: input.managerId,
-        isActive: input.isActive,
+        isActive: existing.uid === actor.uid ? true : input.isActive,
         updatedAt: serverTimestamp(),
       });
 
-      if (username) {
+      if (username && existing.uid !== actor.uid) {
         const credSnap = await getDoc(doc(db, 'authCredentials', username));
         if (credSnap.exists()) {
           await updateDoc(doc(db, 'authCredentials', username), {
@@ -1060,7 +1075,6 @@ export async function saveUserByAdmin(params: {
         }
       }
     } else {
-      // Commit users/{uid} first so firestore.rules userExists(incoming().userId) passes
       await setDoc(doc(db, 'users', uid), {
         uid,
         username,
@@ -1219,6 +1233,45 @@ export async function resetUserPasswordByAdmin(params: {
   }
 }
 
+export async function createGroupByAdmin(params: {
+  code: string;
+  name: string;
+  description: string;
+  leaderId: string;
+  allUsers: UserProfile[];
+  actor: UserProfile;
+}): Promise<void> {
+  const { code, name, description, leaderId, allUsers, actor } = params;
+  const id = makeId('grp');
+  const memberUids = Array.from(
+    new Set([...allUsers.map((u) => u.uid), ...(leaderId ? [leaderId] : [])])
+  ).slice(0, 50);
+
+  try {
+    await setDoc(doc(db, 'groups', id), {
+      id,
+      code: code.trim().toUpperCase().slice(0, 32),
+      name: name.trim().slice(0, 120),
+      description: description.trim().slice(0, 500),
+      leaderId: leaderId || '',
+      memberUids,
+      departmentId: DEPARTMENT_ID,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    await logSystemAudit({
+      actor,
+      action: 'Tạo nhóm việc',
+      targetType: 'group',
+      targetId: id,
+      detail: `Tạo nhóm ${code.trim().toUpperCase()}: ${name.trim()}`,
+      allUsers,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `groups/${id}`);
+  }
+}
+
 export async function saveGroupByAdmin(params: {
   group: WorkGroup;
   name: string;
@@ -1228,13 +1281,15 @@ export async function saveGroupByAdmin(params: {
   actor: UserProfile;
 }): Promise<void> {
   const { group, name, description, leaderId, allUsers, actor } = params;
-  const memberUids = Array.from(new Set([...allUsers.map((u) => u.uid), leaderId])).slice(0, 50);
+  const memberUids = Array.from(
+    new Set([...allUsers.map((u) => u.uid), ...(leaderId ? [leaderId] : [])])
+  ).slice(0, 50);
 
   try {
     await updateDoc(doc(db, 'groups', group.id), {
       name: name.trim().slice(0, 120),
       description: description.trim().slice(0, 500),
-      leaderId,
+      leaderId: leaderId || '',
       memberUids,
       updatedAt: serverTimestamp(),
     });
@@ -1282,6 +1337,157 @@ export async function saveSystemConfigByAdmin(params: {
   }
 }
 
+export async function wipeAllDepartmentData(actor: UserProfile): Promise<{
+  deletedDocs: number;
+  normalizedAdmin: UserProfile;
+}> {
+  let deletedDocs = 0;
+
+  try {
+    // 1. Delete tasks and their subcollections (subtasks, comments, auditLogs)
+    const tasksSnap = await getDocs(
+      query(collection(db, 'tasks'), where('departmentId', '==', DEPARTMENT_ID))
+    );
+    const subDeleteOps: Array<(b: WriteBatch) => void> = [];
+    const taskDeleteOps: Array<(b: WriteBatch) => void> = [];
+
+    for (const taskDoc of tasksSnap.docs) {
+      const [subSnap, cmtSnap, audSnap] = await Promise.all([
+        getDocs(collection(db, 'tasks', taskDoc.id, 'subtasks')),
+        getDocs(collection(db, 'tasks', taskDoc.id, 'comments')),
+        getDocs(collection(db, 'tasks', taskDoc.id, 'auditLogs')),
+      ]);
+      for (const s of subSnap.docs) {
+        subDeleteOps.push((b) => b.delete(s.ref));
+        deletedDocs += 1;
+      }
+      for (const c of cmtSnap.docs) {
+        subDeleteOps.push((b) => b.delete(c.ref));
+        deletedDocs += 1;
+      }
+      for (const a of audSnap.docs) {
+        subDeleteOps.push((b) => b.delete(a.ref));
+        deletedDocs += 1;
+      }
+      taskDeleteOps.push((b) => b.delete(taskDoc.ref));
+      deletedDocs += 1;
+    }
+
+    if (subDeleteOps.length > 0) await runBatchOps(subDeleteOps);
+    if (taskDeleteOps.length > 0) await runBatchOps(taskDeleteOps);
+
+    // 2. Delete workLogs (tasks are now gone so rule allows cleanup) & workLogUnlocks
+    const [wlSnap, ulSnap] = await Promise.all([
+      getDocs(query(collection(db, 'workLogs'), where('departmentId', '==', DEPARTMENT_ID))),
+      getDocs(
+        query(collection(db, 'workLogUnlocks'), where('departmentId', '==', DEPARTMENT_ID))
+      ),
+    ]);
+    const wlOps: Array<(b: WriteBatch) => void> = [];
+    for (const d of wlSnap.docs) {
+      wlOps.push((b) => b.delete(d.ref));
+      deletedDocs += 1;
+    }
+    for (const d of ulSnap.docs) {
+      wlOps.push((b) => b.delete(d.ref));
+      deletedDocs += 1;
+    }
+    if (wlOps.length > 0) await runBatchOps(wlOps);
+
+    // 3. Delete projects & project members
+    const prjSnap = await getDocs(
+      query(collection(db, 'projects'), where('departmentId', '==', DEPARTMENT_ID))
+    );
+    const prjMemberOps: Array<(b: WriteBatch) => void> = [];
+    const prjDeleteOps: Array<(b: WriteBatch) => void> = [];
+    for (const pDoc of prjSnap.docs) {
+      const mSnap = await getDocs(collection(db, 'projects', pDoc.id, 'members'));
+      for (const m of mSnap.docs) {
+        prjMemberOps.push((b) => b.delete(m.ref));
+        deletedDocs += 1;
+      }
+      prjDeleteOps.push((b) => b.delete(pDoc.ref));
+      deletedDocs += 1;
+    }
+    if (prjMemberOps.length > 0) await runBatchOps(prjMemberOps);
+    if (prjDeleteOps.length > 0) await runBatchOps(prjDeleteOps);
+
+    // 4. Delete groups, system auditLogs, and systemConfigs/department
+    const [grpSnap, audSnap, cfgSnap] = await Promise.all([
+      getDocs(query(collection(db, 'groups'), where('departmentId', '==', DEPARTMENT_ID))),
+      getDocs(query(collection(db, 'auditLogs'), where('departmentId', '==', DEPARTMENT_ID))),
+      getDoc(doc(db, 'systemConfigs', 'department')),
+    ]);
+    const miscOps: Array<(b: WriteBatch) => void> = [];
+    for (const d of grpSnap.docs) {
+      miscOps.push((b) => b.delete(d.ref));
+      deletedDocs += 1;
+    }
+    for (const d of audSnap.docs) {
+      miscOps.push((b) => b.delete(d.ref));
+      deletedDocs += 1;
+    }
+    if (cfgSnap.exists()) {
+      miscOps.push((b) => b.delete(cfgSnap.ref));
+      deletedDocs += 1;
+    }
+    if (miscOps.length > 0) await runBatchOps(miscOps);
+
+    // 5. Delete all non-admin users, their private info, and their authCredentials
+    const usersSnap = await getDocs(
+      query(collection(db, 'users'), where('departmentId', '==', DEPARTMENT_ID))
+    );
+    const userOps: Array<(b: WriteBatch) => void> = [];
+    for (const uDoc of usersSnap.docs) {
+      const uData = uDoc.data() as UserProfile;
+      if (uDoc.id === actor.uid || uDoc.id === 'usr_mbfs_admin') {
+        continue;
+      }
+      if (uData.username && uData.username !== DEFAULT_ADMIN_USERNAME) {
+        userOps.push((b) => b.delete(doc(db, 'authCredentials', uData.username!)));
+        deletedDocs += 1;
+      }
+      userOps.push((b) => b.delete(doc(db, 'users', uDoc.id, 'private', 'info')));
+      userOps.push((b) => b.delete(uDoc.ref));
+      deletedDocs += 1;
+    }
+    if (userOps.length > 0) await runBatchOps(userOps);
+
+    // 6. Normalize kept Admin account as pure ADMIN (not Trưởng phòng)
+    const normalizedRoles: RoleCode[] = ['ADMIN'];
+    await updateDoc(doc(db, 'users', actor.uid), {
+      title: 'Quản trị hệ thống',
+      roles: normalizedRoles,
+      groupId: '',
+      managerId: '',
+      isActive: true,
+      updatedAt: serverTimestamp(),
+    });
+
+    const normalizedAdmin: UserProfile = {
+      ...actor,
+      title: 'Quản trị hệ thống',
+      roles: normalizedRoles,
+      groupId: '',
+      managerId: '',
+      isActive: true,
+    };
+
+    await logSystemAudit({
+      actor: normalizedAdmin,
+      action: 'Xóa toàn bộ dữ liệu',
+      targetType: 'system',
+      targetId: DEPARTMENT_ID,
+      detail: `Đã xóa toàn bộ ${deletedDocs} bản ghi dữ liệu, chỉ giữ lại tài khoản Quản trị hệ thống (@${actor.username || DEFAULT_ADMIN_USERNAME})`,
+      allUsers: [normalizedAdmin],
+    });
+
+    return { deletedDocs, normalizedAdmin };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, 'department/wipeAll');
+  }
+}
+
 export async function fetchUserEmailForAdmin(userId: string): Promise<string> {
   try {
     const snap = await getDoc(doc(db, 'users', userId, 'private', 'info'));
@@ -1291,16 +1497,6 @@ export async function fetchUserEmailForAdmin(userId: string): Promise<string> {
     return '';
   } catch {
     return '';
-  }
-}
-
-export async function checkIfDepartmentSeeded(): Promise<boolean> {
-  try {
-    const q = query(collection(db, 'groups'), where('departmentId', '==', DEPARTMENT_ID));
-    const snap = await getDocs(q);
-    return !snap.empty;
-  } catch {
-    return false;
   }
 }
 

@@ -56,7 +56,7 @@ export function CreateTaskModal({
   const [description, setDescription] = useState(editingTask?.description || '');
   const [projectId, setProjectId] = useState(editingTask?.projectId ?? defaultProjectId);
   const [groupId, setGroupId] = useState(
-    editingTask?.groupId || currentUser.groupId || groups[0]?.id || 'grp_1'
+    editingTask?.groupId || currentUser.groupId || groups[0]?.id || ''
   );
   const [assigneeIds, setAssigneeIds] = useState<string[]>(
     editingTask ? [editingTask.assigneeId] : mode === 'SELF' ? [currentUser.uid] : []
@@ -293,6 +293,7 @@ export function CreateTaskModal({
                 onChange={(e) => setGroupId(e.target.value)}
                 className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-blue-700"
               >
+                <option value="">Chưa phân nhóm</option>
                 {groups.map((g) => (
                   <option key={g.id} value={g.id}>
                     {g.name}

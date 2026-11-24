@@ -1,13 +1,17 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Database,
+  Download,
   Edit3,
   KeyRound,
   Lock,
   Plus,
   Settings,
   Shield,
+  Trash2,
   Unlock,
+  Upload,
   Users,
   X,
 } from 'lucide-react';
@@ -20,15 +24,21 @@ import {
   WorkGroup,
 } from '../types/domain';
 import {
+  exportDatabaseToExcel,
+  importDatabaseFromExcel,
+  ImportSummary,
+} from '../lib/excelBackup';
+import {
+  createGroupByAdmin,
   fetchUserEmailForAdmin,
   resetUserPasswordByAdmin,
   saveGroupByAdmin,
   saveSystemConfigByAdmin,
   saveUserByAdmin,
   toggleUserLockByAdmin,
+  wipeAllDepartmentData,
 } from '../lib/firestoreService';
 import { canManageUsers } from '../lib/rbac';
-import { seedDepartmentData } from '../lib/seedData';
 import { formatTimestamp } from '../lib/time';
 
 interface AdminViewProps {
@@ -38,6 +48,7 @@ interface AdminViewProps {
   config: SystemConfig | null;
   auditLogs: SystemAuditLog[];
   onNotify: (msg: string) => void;
+  onCurrentUserUpdated?: (updated: UserProfile) => void;
 }
 
 export function AdminView({
@@ -47,8 +58,9 @@ export function AdminView({
   config,
   auditLogs,
   onNotify,
+  onCurrentUserUpdated,
 }: AdminViewProps) {
-  const [tab, setTab] = useState<'USERS' | 'GROUPS' | 'CONFIG' | 'AUDIT'>('USERS');
+  const [tab, setTab] = useState<'USERS' | 'GROUPS' | 'CONFIG' | 'DATA' | 'AUDIT'>('USERS');
   const isAdmin = canManageUsers(currentUser);
 
   // User modal
@@ -61,7 +73,7 @@ export function AdminView({
   const [uCode, setUCode] = useState('');
   const [uTitle, setUTitle] = useState('');
   const [uRoles, setURoles] = useState<RoleCode[]>(['CHUYEN_VIEN']);
-  const [uGroupId, setUGroupId] = useState(groups[0]?.id || 'grp_1');
+  const [uGroupId, setUGroupId] = useState(groups[0]?.id || '');
   const [uManagerId, setUManagerId] = useState(currentUser.uid);
   const [uActive, setUActive] = useState(true);
   const [userModalError, setUserModalError] = useState('');
@@ -76,11 +88,14 @@ export function AdminView({
   const [resetError, setResetError] = useState('');
   const [resetting, setResetting] = useState(false);
 
-  // Group edit
+  // Group create / edit modal
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<WorkGroup | null>(null);
+  const [gCode, setGCode] = useState('');
   const [gName, setGName] = useState('');
   const [gDesc, setGDesc] = useState('');
   const [gLeader, setGLeader] = useState('');
+  const [savingGroup, setSavingGroup] = useState(false);
 
   // Config state
   const [lockHour, setLockHour] = useState(String(config?.lockHour ?? 23));
@@ -88,7 +103,16 @@ export function AdminView({
   const [reminderHour, setReminderHour] = useState(String(config?.reminderHour ?? 17));
   const [reminderMinute, setReminderMinute] = useState(String(config?.reminderMinute ?? 30));
   const [labelsInput, setLabelsInput] = useState((config?.defaultLabels || []).join(', '));
-  const [seeding, setSeeding] = useState(false);
+
+  // Backup / Import / Wipe state
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
+  const [dataError, setDataError] = useState('');
+  const [wipeModalOpen, setWipeModalOpen] = useState(false);
+  const [wipeConfirmText, setWipeConfirmText] = useState('');
+  const [wiping, setWiping] = useState(false);
 
   function openCreateUser() {
     setEditingUser(null);
@@ -96,11 +120,11 @@ export function AdminView({
     setUInitialPassword('');
     setUEmail('');
     setUName('');
-    setUCode(`CV-${users.length + 1}`);
+    setUCode(`NV-${String(users.length + 1).padStart(2, '0')}`);
     setUTitle('Chuyên viên');
     setURoles(['CHUYEN_VIEN']);
-    setUGroupId(groups[0]?.id || 'grp_1');
-    setUManagerId(currentUser.uid);
+    setUGroupId(groups[0]?.id || '');
+    setUManagerId('');
     setUActive(true);
     setUserModalError('');
     setUserModalOpen(true);
@@ -116,8 +140,8 @@ export function AdminView({
     setUCode(u.employeeCode);
     setUTitle(u.title || '');
     setURoles(u.roles);
-    setUGroupId(u.groupId || 'grp_1');
-    setUManagerId(u.managerId || currentUser.uid);
+    setUGroupId(u.groupId || '');
+    setUManagerId(u.managerId || '');
     setUActive(u.isActive);
     setUserModalError('');
     setUserModalOpen(true);
@@ -130,6 +154,24 @@ export function AdminView({
     setResetConfirm('');
     setResetMustChange(true);
     setResetError('');
+  }
+
+  function openCreateGroup() {
+    setEditingGroup(null);
+    setGCode(`NHOM-${groups.length + 1}`);
+    setGName('');
+    setGDesc('');
+    setGLeader('');
+    setGroupModalOpen(true);
+  }
+
+  function openEditGroup(g: WorkGroup) {
+    setEditingGroup(g);
+    setGCode(g.code);
+    setGName(g.name);
+    setGDesc(g.description || '');
+    setGLeader(g.leaderId || '');
+    setGroupModalOpen(true);
   }
 
   function toggleRole(r: RoleCode) {
@@ -217,17 +259,35 @@ export function AdminView({
 
   async function handleSaveGroup(e: React.FormEvent) {
     e.preventDefault();
-    if (!editingGroup) return;
-    await saveGroupByAdmin({
-      group: editingGroup,
-      name: gName,
-      description: gDesc,
-      leaderId: gLeader,
-      allUsers: users,
-      actor: currentUser,
-    });
-    setEditingGroup(null);
-    onNotify('Đã cập nhật thông tin nhóm việc.');
+    if (!gName.trim()) return;
+    setSavingGroup(true);
+    try {
+      if (editingGroup) {
+        await saveGroupByAdmin({
+          group: editingGroup,
+          name: gName,
+          description: gDesc,
+          leaderId: gLeader,
+          allUsers: users,
+          actor: currentUser,
+        });
+        onNotify('Đã cập nhật thông tin nhóm việc.');
+      } else {
+        await createGroupByAdmin({
+          code: gCode || `NHOM-${groups.length + 1}`,
+          name: gName,
+          description: gDesc,
+          leaderId: gLeader,
+          allUsers: users,
+          actor: currentUser,
+        });
+        onNotify('Đã tạo nhóm việc mới.');
+      }
+      setGroupModalOpen(false);
+      setEditingGroup(null);
+    } finally {
+      setSavingGroup(false);
+    }
   }
 
   async function handleSaveConfig(e: React.FormEvent) {
@@ -251,13 +311,56 @@ export function AdminView({
     onNotify('Đã lưu cấu hình phòng ban.');
   }
 
-  async function handleSeedData() {
-    setSeeding(true);
+  async function handleExportExcel() {
+    setDataError('');
+    setExporting(true);
     try {
-      await seedDepartmentData(currentUser.uid);
-      onNotify('Đã khởi tạo đầy đủ dữ liệu mẫu phòng ban.');
+      await exportDatabaseToExcel(currentUser);
+      onNotify('Đã tải xuống toàn bộ cơ sở dữ liệu dạng Excel (.xlsx).');
+    } catch (err) {
+      setDataError(err instanceof Error ? err.message : 'Không thể xuất file Excel.');
     } finally {
-      setSeeding(false);
+      setExporting(false);
+    }
+  }
+
+  async function handleImportFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setDataError('');
+    setImportResult(null);
+    setImporting(true);
+    try {
+      const result = await importDatabaseFromExcel(file, currentUser);
+      setImportResult(result);
+      onNotify('Đã import dữ liệu từ file Excel thành công.');
+    } catch (err) {
+      setDataError(err instanceof Error ? err.message : 'Import file Excel thất bại.');
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handleWipeAllData(e: React.FormEvent) {
+    e.preventDefault();
+    if (wipeConfirmText.trim().toUpperCase() !== 'XOA TOAN BO') return;
+    setDataError('');
+    setWiping(true);
+    try {
+      const res = await wipeAllDepartmentData(currentUser);
+      if (onCurrentUserUpdated) {
+        onCurrentUserUpdated(res.normalizedAdmin);
+      }
+      setWipeModalOpen(false);
+      setWipeConfirmText('');
+      setImportResult(null);
+      onNotify(`Đã xóa ${res.deletedDocs} bản ghi dữ liệu, chỉ giữ lại tài khoản Admin.`);
+    } catch (err) {
+      setDataError(err instanceof Error ? err.message : 'Không thể xóa dữ liệu.');
+    } finally {
+      setWiping(false);
     }
   }
 
@@ -283,7 +386,7 @@ export function AdminView({
             }`}
           >
             <Shield className="w-3.5 h-3.5" />
-            4 Nhóm việc ({groups.length})
+            Nhóm việc ({groups.length})
           </button>
           <button
             type="button"
@@ -295,6 +398,18 @@ export function AdminView({
             <Settings className="w-3.5 h-3.5" />
             Cấu hình khóa ngày
           </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setTab('DATA')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap ${
+                tab === 'DATA' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+              }`}
+            >
+              <Database className="w-3.5 h-3.5" />
+              Sao lưu & Dữ liệu
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setTab('AUDIT')}
@@ -306,26 +421,26 @@ export function AdminView({
           </button>
         </div>
 
-        {isAdmin && (
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={seeding}
-              onClick={handleSeedData}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap"
-            >
-              <Database className="w-3.5 h-3.5" />
-              {seeding ? 'Đang khởi tạo...' : 'Khởi tạo dữ liệu mẫu'}
-            </button>
-            <button
-              type="button"
-              onClick={openCreateUser}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 whitespace-nowrap"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              Tạo tài khoản nhân sự
-            </button>
-          </div>
+        {isAdmin && tab === 'USERS' && (
+          <button
+            type="button"
+            onClick={openCreateUser}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 whitespace-nowrap"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Tạo tài khoản nhân sự
+          </button>
+        )}
+
+        {isAdmin && tab === 'GROUPS' && (
+          <button
+            type="button"
+            onClick={openCreateGroup}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 whitespace-nowrap"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Thêm nhóm việc
+          </button>
         )}
       </div>
 
@@ -428,42 +543,61 @@ export function AdminView({
       )}
 
       {tab === 'GROUPS' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {groups.map((g) => {
-            const leader = users.find((u) => u.uid === g.leaderId);
-            const members = users.filter((u) => u.groupId === g.id);
-            return (
-              <div key={g.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-mono text-xs font-semibold text-blue-700">{g.code}</div>
-                    <h3 className="text-base font-semibold text-slate-900 mt-0.5">{g.name}</h3>
+        <div className="space-y-4">
+          {groups.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-3">
+              <p className="text-sm text-slate-600">
+                Chưa có nhóm việc nào trong phòng ban.
+              </p>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={openCreateGroup}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Tạo nhóm việc đầu tiên
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {groups.map((g) => {
+                const leader = users.find((u) => u.uid === g.leaderId);
+                const members = users.filter((u) => u.groupId === g.id);
+                return (
+                  <div
+                    key={g.id}
+                    className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-mono text-xs font-semibold text-blue-700">{g.code}</div>
+                        <h3 className="text-base font-semibold text-slate-900 mt-0.5">{g.name}</h3>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          type="button"
+                          onClick={() => openEditGroup(g)}
+                          className="text-xs font-medium text-blue-700 hover:underline"
+                        >
+                          Chỉnh sửa
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-600">{g.description || '—'}</p>
+                    <div className="pt-2 border-t border-slate-100 text-xs text-slate-600 flex justify-between">
+                      <span>
+                        Trưởng nhóm:{' '}
+                        <strong className="text-slate-900">{leader?.fullName || '—'}</strong>
+                      </span>
+                      <span className="tabular-nums">{members.length} nhân sự</span>
+                    </div>
                   </div>
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingGroup(g);
-                        setGName(g.name);
-                        setGDesc(g.description || '');
-                        setGLeader(g.leaderId);
-                      }}
-                      className="text-xs font-medium text-blue-700 hover:underline"
-                    >
-                      Chỉnh sửa
-                    </button>
-                  )}
-                </div>
-                <p className="text-xs text-slate-600">{g.description || '—'}</p>
-                <div className="pt-2 border-t border-slate-100 text-xs text-slate-600 flex justify-between">
-                  <span>
-                    Trưởng nhóm: <strong className="text-slate-900">{leader?.fullName || '—'}</strong>
-                  </span>
-                  <span className="tabular-nums">{members.length} nhân sự</span>
-                </div>
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -554,6 +688,128 @@ export function AdminView({
             </button>
           )}
         </form>
+      )}
+
+      {tab === 'DATA' && isAdmin && (
+        <div className="space-y-4">
+          {dataError && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+              {dataError}
+            </div>
+          )}
+
+          {importResult && (
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+              <div className="font-semibold">Import Excel hoàn tất:</div>
+              <div>
+                Nhân sự: <strong className="tabular-nums">{importResult.users}</strong> · Tài khoản:{' '}
+                <strong className="tabular-nums">{importResult.credentials}</strong> · Nhóm:{' '}
+                <strong className="tabular-nums">{importResult.groups}</strong> · Dự án:{' '}
+                <strong className="tabular-nums">{importResult.projects}</strong> · Công việc:{' '}
+                <strong className="tabular-nums">{importResult.tasks}</strong> · Đầu việc con:{' '}
+                <strong className="tabular-nums">{importResult.subtasks}</strong> · Bình luận:{' '}
+                <strong className="tabular-nums">{importResult.comments}</strong> · Nhật ký làm việc:{' '}
+                <strong className="tabular-nums">{importResult.workLogs}</strong>
+                {importResult.skippedLockedTasks > 0 && (
+                  <span>
+                    {' '}
+                    · Bỏ qua {importResult.skippedLockedTasks} công việc đã khóa chỉnh sửa
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Export Excel */}
+            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center shrink-0">
+                  <Download className="w-5 h-5" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Tải toàn bộ cơ sở dữ liệu (.xlsx)
+                  </h3>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Xuất toàn bộ bảng nhân sự, tài khoản, nhóm việc, dự án, công việc, đầu việc con, bình luận, nhật ký làm việc, cấu hình và nhật ký hệ thống thành file Excel nhiều sheet.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={handleExportExcel}
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" />
+                {exporting ? 'Đang xuất file Excel...' : 'Tải xuống cơ sở dữ liệu Excel'}
+              </button>
+            </div>
+
+            {/* Import Excel */}
+            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                  <Upload className="w-5 h-5" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Import cơ sở dữ liệu từ Excel (.xlsx)
+                  </h3>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Nạp lại dữ liệu từ file Excel đã xuất (hoặc chỉnh sửa theo đúng cấu trúc cột). Có thể điền cột <code className="font-mono bg-slate-100 px-1 rounded">initialPassword</code> ở sheet <code className="font-mono bg-slate-100 px-1 rounded">NhanSu</code> để cấp mật khẩu mới cho tài khoản.
+                  </p>
+                </div>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleImportFileSelected}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={importing}
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 disabled:opacity-50"
+              >
+                <Upload className="w-4 h-4" />
+                {importing ? 'Đang nạp dữ liệu...' : 'Chọn file Excel (.xlsx) để Import'}
+              </button>
+            </div>
+          </div>
+
+          {/* Danger Zone: Wipe All Data */}
+          <div className="bg-white border border-red-200 rounded-xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-red-50 text-red-700 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold text-red-900">
+                  Xóa toàn bộ dữ liệu hệ thống (chỉ giữ lại tài khoản Admin)
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Thao tác này sẽ xóa vĩnh viễn toàn bộ dự án, công việc, đầu việc con, bình luận, nhật ký làm việc, nhóm việc, cấu hình và tất cả tài khoản nhân sự khác — chỉ giữ lại duy nhất tài khoản Quản trị hệ thống hiện tại (@{currentUser.username}). Nên tải file Excel sao lưu trước khi xóa.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setWipeConfirmText('');
+                setDataError('');
+                setWipeModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-red-700 rounded-lg hover:bg-red-800"
+            >
+              <Trash2 className="w-4 h-4" />
+              Xóa toàn bộ dữ liệu...
+            </button>
+          </div>
+        </div>
       )}
 
       {tab === 'AUDIT' && (
@@ -714,6 +970,7 @@ export function AdminView({
                     onChange={(e) => setUGroupId(e.target.value)}
                     className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg"
                   >
+                    <option value="">Chưa phân nhóm</option>
                     {groups.map((g) => (
                       <option key={g.id} value={g.id}>
                         {g.name}
@@ -764,6 +1021,7 @@ export function AdminView({
               <label className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
+                  disabled={editingUser?.uid === currentUser.uid}
                   checked={uActive}
                   onChange={(e) => setUActive(e.target.checked)}
                 />
@@ -888,30 +1146,49 @@ export function AdminView({
         </div>
       )}
 
-      {/* Group Modal */}
-      {editingGroup && (
+      {/* Group Create / Edit Modal */}
+      {groupModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
           <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold text-slate-900">
-                Chỉnh sửa {editingGroup.code}
+                {editingGroup ? `Chỉnh sửa ${editingGroup.code}` : 'Thêm nhóm việc mới'}
               </h3>
               <button
                 type="button"
-                onClick={() => setEditingGroup(null)}
+                onClick={() => {
+                  setGroupModalOpen(false);
+                  setEditingGroup(null);
+                }}
                 className="p-1 text-slate-400 hover:text-slate-700"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleSaveGroup} className="space-y-3">
+              {!editingGroup && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Mã nhóm *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={gCode}
+                    onChange={(e) => setGCode(e.target.value.toUpperCase())}
+                    placeholder="VD: NHOM-1"
+                    className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  />
+                </div>
+              )}
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Tên nhóm</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Tên nhóm *</label>
                 <input
                   type="text"
                   required
                   value={gName}
                   onChange={(e) => setGName(e.target.value)}
+                  placeholder="VD: Nhóm 1: Hành chính tổng hợp"
                   className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                 />
               </div>
@@ -933,6 +1210,7 @@ export function AdminView({
                   onChange={(e) => setGLeader(e.target.value)}
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg"
                 >
+                  <option value="">Chưa chỉ định</option>
                   {users.map((u) => (
                     <option key={u.uid} value={u.uid}>
                       {u.fullName} ({u.employeeCode})
@@ -943,16 +1221,77 @@ export function AdminView({
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setEditingGroup(null)}
+                  onClick={() => {
+                    setGroupModalOpen(false);
+                    setEditingGroup(null);
+                  }}
                   className="px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
                 >
                   Hủy
                 </button>
                 <button
                   type="submit"
-                  className="px-3.5 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800"
+                  disabled={savingGroup}
+                  className="px-3.5 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 disabled:opacity-50"
                 >
-                  Lưu nhóm
+                  {savingGroup ? 'Đang lưu...' : 'Lưu nhóm'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Wipe All Data Confirmation Modal */}
+      {wipeModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 text-red-700 font-semibold text-base">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <span>Xác nhận xóa toàn bộ dữ liệu</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWipeModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Toàn bộ dự án, công việc, log work, nhóm việc, cấu hình và tài khoản nhân sự khác sẽ bị xóa vĩnh viễn. Chỉ duy nhất tài khoản Quản trị hệ thống (<strong className="font-mono">@{currentUser.username}</strong>) được giữ lại.
+            </p>
+
+            <form onSubmit={handleWipeAllData} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Nhập <strong className="font-mono text-red-700">XOA TOAN BO</strong> để xác nhận:
+                </label>
+                <input
+                  type="text"
+                  value={wipeConfirmText}
+                  onChange={(e) => setWipeConfirmText(e.target.value)}
+                  placeholder="XOA TOAN BO"
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-red-600"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setWipeModalOpen(false)}
+                  className="px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={wiping || wipeConfirmText.trim().toUpperCase() !== 'XOA TOAN BO'}
+                  className="px-3.5 py-2 text-xs font-medium text-white bg-red-700 rounded-lg hover:bg-red-800 disabled:opacity-40"
+                >
+                  {wiping ? 'Đang xóa dữ liệu...' : 'Xác nhận xóa toàn bộ'}
                 </button>
               </div>
             </form>

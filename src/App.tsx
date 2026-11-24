@@ -34,18 +34,13 @@ import {
   WorkLogUnlock,
 } from './types/domain';
 import { db, handleFirestoreError, OperationType } from './lib/firebase';
-import {
-  checkIfDepartmentSeeded,
-  logoutSession,
-  restoreCurrentSession,
-} from './lib/firestoreService';
+import { logoutSession, restoreCurrentSession } from './lib/firestoreService';
 import {
   canViewAdminSection,
   getVisibleTasks,
   isAdminUser,
   isLeadershipUser,
 } from './lib/rbac';
-import { seedDepartmentData } from './lib/seedData';
 import { AdminView } from './components/AdminView';
 import { AuthScreen, FirstLoginPasswordScreen } from './components/AuthScreen';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
@@ -101,38 +96,25 @@ function AppContent() {
     }, 3500);
   }
 
-  async function ensureSeededIfAdmin(user: UserProfile) {
-    if (user.roles.includes('ADMIN')) {
-      const alreadySeeded = await checkIfDepartmentSeeded();
-      if (!alreadySeeded) {
-        await seedDepartmentData(user.uid);
-      }
-    }
-  }
-
   useEffect(() => {
     let active = true;
-    restoreCurrentSession().then(async (res) => {
+    restoreCurrentSession().then((res) => {
       if (!active) return;
       if (res) {
         setCurrentUser(res.user);
         setMustChangePassword(res.mustChangePassword);
-        await ensureSeededIfAdmin(res.user);
       } else {
         setCurrentUser(null);
         setMustChangePassword(false);
       }
-      if (active) {
-        setAuthReady(true);
-      }
+      setAuthReady(true);
     });
     return () => {
       active = false;
     };
   }, []);
 
-  async function handleAuthenticated(res: { user: UserProfile; mustChangePassword: boolean }) {
-    await ensureSeededIfAdmin(res.user);
+  function handleAuthenticated(res: { user: UserProfile; mustChangePassword: boolean }) {
     setCurrentUser(res.user);
     setMustChangePassword(res.mustChangePassword);
     setActiveNav('WORKSPACE');
@@ -585,6 +567,7 @@ function AppContent() {
               config={config}
               auditLogs={visibleAuditLogs}
               onNotify={showToast}
+              onCurrentUserUpdated={(updated) => setCurrentUser(updated)}
             />
           )}
         </main>

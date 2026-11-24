@@ -325,6 +325,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           incoming().diff(existing()).affectedKeys().hasOnly(['passwordHash', 'mustChangePassword', 'failedAttempts', 'lockedUntil', 'isActive', 'updatedAt'])
         );
+      allow delete: if isValidUsername(username) && username != 'mbfs_admin';
     }
 
     // Users (non-PII org directory)
@@ -344,10 +345,13 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time;
 
+      allow delete: if isValidId(userId) && userId != 'usr_mbfs_admin';
+
       match /private/{docId} {
         allow get: if isValidId(userId) && isValidId(docId);
         allow create: if isValidId(userId) && isValidId(docId) && isValidUserPrivate(incoming()) && incoming().updatedAt == request.time;
         allow update: if isValidId(userId) && isValidId(docId) && isValidUserPrivate(incoming()) && incoming().uid == existing().uid && incoming().updatedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(docId);
       }
     }
 
@@ -358,6 +362,7 @@ service cloud.firestore {
 
       allow create: if isValidId(groupId) && isValidGroup(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
       allow update: if isValidId(groupId) && isValidGroup(incoming()) && incoming().id == existing().id && incoming().departmentId == existing().departmentId && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time;
+      allow delete: if isValidId(groupId);
     }
 
     // Projects
@@ -378,6 +383,8 @@ service cloud.firestore {
         incoming().departmentId == existing().departmentId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time;
+
+      allow delete: if isValidId(projectId);
 
       match /members/{memberId} {
         allow get: if isValidId(projectId) && isValidId(memberId);
@@ -421,6 +428,8 @@ service cloud.firestore {
           )
         );
 
+      allow delete: if isValidId(taskId);
+
       match /subtasks/{subtaskId} {
         allow get: if isValidId(taskId) && isValidId(subtaskId);
         allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
@@ -432,12 +441,14 @@ service cloud.firestore {
         allow get: if isValidId(taskId) && isValidId(commentId);
         allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
         allow create: if isValidId(taskId) && isValidId(commentId) && isValidComment(incoming()) && incoming().createdAt == request.time;
+        allow delete: if isValidId(taskId) && isValidId(commentId);
       }
 
       match /auditLogs/{logId} {
         allow get: if isValidId(taskId) && isValidId(logId);
         allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
         allow create: if isValidId(taskId) && isValidId(logId) && isValidTaskAuditLog(incoming()) && incoming().createdAt == request.time;
+        allow delete: if isValidId(taskId) && isValidId(logId);
       }
     }
 
@@ -466,9 +477,10 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isWorkLogDateEditable(existing().userId, existing().workDate, existing().workDateNum);
 
-      allow delete: if isValidId(logId) &&
-        isActiveUser(existing().userId) &&
-        isWorkLogDateEditable(existing().userId, existing().workDate, existing().workDateNum);
+      allow delete: if isValidId(logId) && (
+        (isActiveUser(existing().userId) && isWorkLogDateEditable(existing().userId, existing().workDate, existing().workDateNum)) ||
+        !exists(/databases/$(database)/documents/tasks/$(existing().taskId))
+      );
     }
 
     // WorkLog Unlocks (Admin or Trưởng/Phó phòng only via isLeadershipUser check)
@@ -486,6 +498,7 @@ service cloud.firestore {
     match /systemConfigs/{configId} {
       allow get: if isValidId(configId);
       allow create, update: if isValidId(configId) && isValidSystemConfig(incoming()) && incoming().updatedAt == request.time;
+      allow delete: if isValidId(configId);
     }
 
     // System Audit Logs
@@ -493,6 +506,7 @@ service cloud.firestore {
       allow get: if isValidId(logId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
       allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().createdAt == request.time;
+      allow delete: if isValidId(logId);
     }
   }
 }
