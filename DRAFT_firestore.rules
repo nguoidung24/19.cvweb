@@ -329,7 +329,7 @@ service cloud.firestore {
 
     // Users (non-PII org directory)
     match /users/{userId} {
-      allow get: if isValidId(userId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(userId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(userId) &&
@@ -353,7 +353,7 @@ service cloud.firestore {
 
     // Work Groups (4 groups)
     match /groups/{groupId} {
-      allow get: if isValidId(groupId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(groupId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(groupId) && isValidGroup(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
@@ -362,7 +362,7 @@ service cloud.firestore {
 
     // Projects
     match /projects/{projectId} {
-      allow get: if isValidId(projectId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(projectId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(projectId) &&
@@ -389,7 +389,7 @@ service cloud.firestore {
 
     // Tasks
     match /tasks/{taskId} {
-      allow get: if isValidId(taskId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(taskId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(taskId) &&
@@ -443,7 +443,7 @@ service cloud.firestore {
 
     // WorkLogs (enforces Vietnam UTC+7 date lock on server)
     match /workLogs/{logId} {
-      allow get: if isValidId(logId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(logId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
 
       allow create: if isValidId(logId) &&
@@ -473,7 +473,7 @@ service cloud.firestore {
 
     // WorkLog Unlocks (Admin or Trưởng/Phó phòng only via isLeadershipUser check)
     match /workLogUnlocks/{unlockId} {
-      allow get: if isValidId(unlockId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(unlockId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
       allow create, update: if isValidId(unlockId) &&
         isValidWorkLogUnlock(incoming()) &&
@@ -490,7 +490,7 @@ service cloud.firestore {
 
     // System Audit Logs
     match /auditLogs/{logId} {
-      allow get: if isValidId(logId) && resource.data.departmentId == 'DAMA2';
+      allow get: if isValidId(logId) && (resource == null || resource.data.departmentId == 'DAMA2');
       allow list: if resource.data.departmentId == 'DAMA2';
       allow create: if isValidId(logId) && isValidAuditLog(incoming()) && incoming().createdAt == request.time;
     }

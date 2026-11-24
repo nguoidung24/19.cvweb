@@ -13,7 +13,7 @@ import { UserProfile } from '../types/domain';
 import { changeOwnPassword, loginWithUsernamePassword } from '../lib/firestoreService';
 
 interface AuthScreenProps {
-  onAuthenticated: (result: { user: UserProfile; mustChangePassword: boolean }) => void;
+  onAuthenticated: (result: { user: UserProfile; mustChangePassword: boolean }) => Promise<void> | void;
 }
 
 export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
@@ -34,7 +34,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setLoading(true);
     try {
       const res = await loginWithUsernamePassword(username, password);
-      onAuthenticated(res);
+      await onAuthenticated(res);
     } catch (err) {
       const msg =
         err instanceof Error
