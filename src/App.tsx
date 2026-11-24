@@ -156,9 +156,6 @@ function AppContent() {
   useEffect(() => {
     if (!authReady || !currentUser || mustChangePassword) return;
 
-    const uid = currentUser.uid;
-    const isDeptLeadership = isLeadershipUser(currentUser);
-
     const unsubUsers = onSnapshot(
       query(collection(db, 'users'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
@@ -167,11 +164,8 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'users')
     );
 
-    const groupsQ = isDeptLeadership
-      ? query(collection(db, 'groups'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'groups'), where('memberUids', 'array-contains', uid));
     const unsubGroups = onSnapshot(
-      groupsQ,
+      query(collection(db, 'groups'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setGroups(
           snap.docs
@@ -182,44 +176,32 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'groups')
     );
 
-    const projectsQ = isDeptLeadership
-      ? query(collection(db, 'projects'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'projects'), where('memberIds', 'array-contains', uid));
     const unsubProjects = onSnapshot(
-      projectsQ,
+      query(collection(db, 'projects'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setProjects(snap.docs.map((d) => d.data() as Project));
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'projects')
     );
 
-    const tasksQ = isDeptLeadership
-      ? query(collection(db, 'tasks'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'tasks'), where('participantIds', 'array-contains', uid));
     const unsubTasks = onSnapshot(
-      tasksQ,
+      query(collection(db, 'tasks'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setTasks(snap.docs.map((d) => d.data() as TaskItem));
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'tasks')
     );
 
-    const workLogsQ = isDeptLeadership
-      ? query(collection(db, 'workLogs'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'workLogs'), where('viewerIds', 'array-contains', uid));
     const unsubWorkLogs = onSnapshot(
-      workLogsQ,
+      query(collection(db, 'workLogs'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setWorkLogs(snap.docs.map((d) => d.data() as WorkLog));
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'workLogs')
     );
 
-    const unlocksQ = isDeptLeadership
-      ? query(collection(db, 'workLogUnlocks'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'workLogUnlocks'), where('userId', '==', uid));
     const unsubUnlocks = onSnapshot(
-      unlocksQ,
+      query(collection(db, 'workLogUnlocks'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setUnlocks(snap.docs.map((d) => d.data() as WorkLogUnlock));
       },
@@ -236,11 +218,8 @@ function AppContent() {
       (err) => handleFirestoreError(err, OperationType.GET, 'systemConfigs/department')
     );
 
-    const auditQ = isDeptLeadership
-      ? query(collection(db, 'auditLogs'), where('departmentId', '==', DEPARTMENT_ID))
-      : query(collection(db, 'auditLogs'), where('viewerIds', 'array-contains', uid));
     const unsubAudits = onSnapshot(
-      auditQ,
+      query(collection(db, 'auditLogs'), where('departmentId', '==', DEPARTMENT_ID)),
       (snap) => {
         setAuditLogs(snap.docs.map((d) => d.data() as SystemAuditLog));
       },
@@ -259,10 +238,38 @@ function AppContent() {
     };
   }, [authReady, currentUser?.uid, mustChangePassword]);
 
+  const visibleProjects = useMemo(() => {
+    if (!currentUser) return [];
+    if (isLeadershipUser(currentUser)) return projects;
+    return projects.filter(
+      (p) => p.pmId === currentUser.uid || p.memberIds.includes(currentUser.uid)
+    );
+  }, [currentUser, projects]);
+
   const visibleTasks = useMemo(
-    () => getVisibleTasks(currentUser, tasks, projects),
-    [currentUser, tasks, projects]
+    () => getVisibleTasks(currentUser, tasks, visibleProjects),
+    [currentUser, tasks, visibleProjects]
   );
+
+  const visibleWorkLogs = useMemo(() => {
+    if (!currentUser) return [];
+    if (isLeadershipUser(currentUser)) return workLogs;
+    return workLogs.filter(
+      (w) => w.userId === currentUser.uid || w.viewerIds.includes(currentUser.uid)
+    );
+  }, [currentUser, workLogs]);
+
+  const visibleUnlocks = useMemo(() => {
+    if (!currentUser) return [];
+    if (isLeadershipUser(currentUser)) return unlocks;
+    return unlocks.filter((ul) => ul.userId === currentUser.uid);
+  }, [currentUser, unlocks]);
+
+  const visibleAuditLogs = useMemo(() => {
+    if (!currentUser) return [];
+    if (isLeadershipUser(currentUser)) return auditLogs;
+    return auditLogs.filter((a) => a.viewerIds.includes(currentUser.uid));
+  }, [currentUser, auditLogs]);
 
   const selectedTask = useMemo(
     () => visibleTasks.find((t) => t.id === selectedTaskId) || null,
@@ -502,7 +509,7 @@ function AppContent() {
               tasks={visibleTasks}
               users={users}
               groups={groups}
-              projects={projects}
+              projects={visibleProjects}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onCreateTask={() => {
                 setEditingTask(null);
@@ -517,7 +524,7 @@ function AppContent() {
             <KanbanBoard
               tasks={visibleTasks.filter((t) => t.status !== 'HUY')}
               users={users}
-              projects={projects}
+              projects={visibleProjects}
               currentUser={currentUser}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onNotify={showToast}
@@ -529,7 +536,7 @@ function AppContent() {
               tasks={visibleTasks}
               users={users}
               groups={groups}
-              projects={projects}
+              projects={visibleProjects}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onCreateTask={() => {
                 setEditingTask(null);
@@ -542,11 +549,11 @@ function AppContent() {
           {activeNav === 'PROJECTS' && (
             <ProjectsView
               currentUser={currentUser}
-              projects={projects}
+              projects={visibleProjects}
               tasks={visibleTasks}
               users={users}
               groups={groups}
-              auditLogs={auditLogs}
+              auditLogs={visibleAuditLogs}
               availableLabels={availableLabels}
               onSelectTask={(t) => setSelectedTaskId(t.id)}
               onCreateTaskInProject={(prjId) => {
@@ -563,8 +570,8 @@ function AppContent() {
               currentUser={currentUser}
               users={users}
               tasks={visibleTasks}
-              workLogs={workLogs}
-              unlocks={unlocks}
+              workLogs={visibleWorkLogs}
+              unlocks={visibleUnlocks}
               config={config}
               onNotify={showToast}
             />
@@ -576,7 +583,7 @@ function AppContent() {
               users={users}
               groups={groups}
               config={config}
-              auditLogs={auditLogs}
+              auditLogs={visibleAuditLogs}
               onNotify={showToast}
             />
           )}
@@ -590,7 +597,7 @@ function AppContent() {
         currentUser={currentUser}
         users={users}
         groups={groups}
-        projects={projects}
+        projects={visibleProjects}
         allTasks={visibleTasks}
         onOpenEdit={(t) => {
           setEditingTask(t);
@@ -610,7 +617,7 @@ function AppContent() {
           currentUser={currentUser}
           users={users}
           groups={groups}
-          projects={projects}
+          projects={visibleProjects}
           defaultProjectId={createTaskProjectId}
           editingTask={editingTask}
           existingTaskCount={tasks.length}

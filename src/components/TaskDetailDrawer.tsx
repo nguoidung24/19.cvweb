@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import {
   CheckSquare,
   Edit3,
@@ -86,14 +86,10 @@ export function TaskDetailDrawer({
     setReviewNote('');
     setSubmitNote('');
 
-    const isBootAdmin = currentUser.roles.includes('ADMIN');
-
-    const subQ = isBootAdmin
-      ? query(collection(db, 'tasks', task.id, 'subtasks'), orderBy('createdAt', 'asc'))
-      : query(
-          collection(db, 'tasks', task.id, 'subtasks'),
-          where('taskParticipantIds', 'array-contains', currentUser.uid)
-        );
+    const subQ = query(
+      collection(db, 'tasks', task.id, 'subtasks'),
+      orderBy('createdAt', 'asc')
+    );
     const unsubSub = onSnapshot(
       subQ,
       (snap) => {
@@ -102,12 +98,10 @@ export function TaskDetailDrawer({
       (err) => handleFirestoreError(err, OperationType.LIST, `tasks/${task.id}/subtasks`)
     );
 
-    const cmtQ = isBootAdmin
-      ? query(collection(db, 'tasks', task.id, 'comments'), orderBy('createdAt', 'asc'))
-      : query(
-          collection(db, 'tasks', task.id, 'comments'),
-          where('taskParticipantIds', 'array-contains', currentUser.uid)
-        );
+    const cmtQ = query(
+      collection(db, 'tasks', task.id, 'comments'),
+      orderBy('createdAt', 'asc')
+    );
     const unsubCmt = onSnapshot(
       cmtQ,
       (snap) => {
@@ -116,12 +110,10 @@ export function TaskDetailDrawer({
       (err) => handleFirestoreError(err, OperationType.LIST, `tasks/${task.id}/comments`)
     );
 
-    const audQ = isBootAdmin
-      ? query(collection(db, 'tasks', task.id, 'auditLogs'), orderBy('createdAt', 'desc'))
-      : query(
-          collection(db, 'tasks', task.id, 'auditLogs'),
-          where('taskParticipantIds', 'array-contains', currentUser.uid)
-        );
+    const audQ = query(
+      collection(db, 'tasks', task.id, 'auditLogs'),
+      orderBy('createdAt', 'desc')
+    );
     const unsubAud = onSnapshot(
       audQ,
       (snap) => {
@@ -135,7 +127,7 @@ export function TaskDetailDrawer({
       unsubCmt();
       unsubAud();
     };
-  }, [task?.id, currentUser.uid, currentUser.roles]);
+  }, [task?.id]);
 
   if (!task) return null;
 

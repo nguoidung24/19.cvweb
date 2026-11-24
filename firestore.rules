@@ -381,7 +381,7 @@ service cloud.firestore {
 
       match /members/{memberId} {
         allow get: if isValidId(projectId) && isValidId(memberId);
-        allow list: if resource.data.userId != '';
+        allow list: if isValidId(projectId) && get(/databases/$(database)/documents/projects/$(projectId)).data.departmentId == 'DAMA2';
         allow create, update: if isValidId(projectId) && isValidId(memberId) && isValidProjectMember(incoming()) && incoming().joinedAt == request.time;
         allow delete: if isValidId(projectId) && isValidId(memberId);
       }
@@ -423,20 +423,20 @@ service cloud.firestore {
 
       match /subtasks/{subtaskId} {
         allow get: if isValidId(taskId) && isValidId(subtaskId);
-        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
         allow create, update: if isValidId(taskId) && isValidId(subtaskId) && isValidSubtask(incoming());
         allow delete: if isValidId(taskId) && isValidId(subtaskId);
       }
 
       match /comments/{commentId} {
         allow get: if isValidId(taskId) && isValidId(commentId);
-        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
         allow create: if isValidId(taskId) && isValidId(commentId) && isValidComment(incoming()) && incoming().createdAt == request.time;
       }
 
       match /auditLogs/{logId} {
         allow get: if isValidId(taskId) && isValidId(logId);
-        allow list: if resource.data.taskParticipantIds.size() >= 1;
+        allow list: if isValidId(taskId) && get(/databases/$(database)/documents/tasks/$(taskId)).data.departmentId == 'DAMA2';
         allow create: if isValidId(taskId) && isValidId(logId) && isValidTaskAuditLog(incoming()) && incoming().createdAt == request.time;
       }
     }
